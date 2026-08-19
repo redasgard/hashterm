@@ -5,7 +5,41 @@
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Restored programs may only be exec'd from these system directories. A
+/// save file is untrusted input; without this a manifest (or a poisoned
+/// `$PATH` entry like a writable `~/.local/bin`) could point argv[0] at an
+/// attacker-controlled binary.
+const EXEC_ALLOW: &[&str] = &[
+    "/usr/bin",
+    "/usr/local/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/opt",
+];
+
+/// Resolve argv[0] to a real path under an allow-listed dir, or None.
+fn resolve_allowed(arg0: &str) -> Option<PathBuf> {
+    let candidate = if arg0.contains('/') {
+        PathBuf::from(arg0)
+    } else {
+        // Bare name: emulate PATH search so we validate what execvp would run.
+        std::env::var_os("PATH")
+            .map(|path| {
+                std::env::split_paths(&path)
+                    .map(|d| d.join(arg0))
+                    .find(|p| p.is_file())
+            })?
+            ?
+    };
+    let real = std::fs::canonicalize(candidate).ok()?;
+    EXEC_ALLOW
+        .iter()
+        .any(|dir| real.starts_with(dir))
+        .then_some(real)
+}
 
 pub fn run_restore_pane(
     scrollback: Option<&Path>,
@@ -41,10 +75,18 @@ pub fn run_restore_pane(
         let _ = out.flush();
     }
 
-    // exec() replaces this process; on success nothing below runs.
-    let err = if let Some(argv) = exec.filter(|a| !a.is_empty()) {
-        std::process::Command::new(&argv[0]).args(&argv[1..]).exec()
+    // exec() replaces this process; on success nothing below runs. Resolve
+    // and allow-list the target first; a rejected or unresolvable program
+    // falls through to a plain shell rather than running something untrusted.
+    let allowed = exec
+        .filter(|a| !a.is_empty())
+        .and_then(|argv| resolve_allowed(&argv[0]).map(|real| (real, argv)));
+    let err = if let Some((real, argv)) = allowed {
+        std::process::Command::new(real).args(&argv[1..]).exec()
     } else {
+        if exec.is_some_and(|a| !a.is_empty()) {
+            eprintln!("hashterm: refusing to exec restored program outside system dirs");
+        }
         let sh = shell
             .map(str::to_owned)
             .or_else(|| std::env::var("SHELL").ok())

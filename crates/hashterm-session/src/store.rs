@@ -75,6 +75,9 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
 pub struct SaveMeta {
     pub name: String,
     pub created_at: String,
+    /// Local-time display ("YYYY-MM-DD HH:MM"); falls back to created_at (UTC)
+    /// for saves written before this field existed.
+    pub created_local: String,
     pub session_count: usize,
     pub auto: bool,
 }
@@ -240,9 +243,15 @@ impl SessionStore {
                     continue;
                 }
                 if let Ok((m, _)) = self.load(&name, auto) {
+                    let created_local = if m.created_local.is_empty() {
+                        m.created_at.clone()
+                    } else {
+                        m.created_local
+                    };
                     out.push(SaveMeta {
                         name,
                         created_at: m.created_at,
+                        created_local,
                         session_count: m.sessions.len(),
                         auto,
                     });
@@ -317,6 +326,7 @@ mod tests {
         DumpManifest {
             schema_version: SCHEMA_VERSION,
             created_at: "2026-08-14T10:00:00Z".into(),
+            created_local: "2026-08-14 10:00".into(),
             tmux_version: "3.5a".into(),
             client_size: (80, 24),
             sessions: vec![],

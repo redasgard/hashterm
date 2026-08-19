@@ -98,6 +98,7 @@ fn dump_kill_restore_roundtrip() {
         pretype_unrestored: true,
         shell: Some("sh".into()),
         helper: PathBuf::from(env!("CARGO_BIN_EXE_hashterm")),
+        resume: std::collections::HashMap::new(),
     };
     let report =
         hashterm_session::restore_save(&ctl, &store, "e2e", false, &opts).expect("restore");

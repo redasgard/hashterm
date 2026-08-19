@@ -983,6 +983,7 @@ version = "0.1.0"
 dependencies = [
  "hashterm-core",
  "hashterm-tmux",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

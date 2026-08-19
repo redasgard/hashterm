@@ -45,6 +45,10 @@ pub struct RestoreOptions {
     pub shell: Option<String>,
     /// Path to the hashterm binary providing `restore-pane`.
     pub helper: PathBuf,
+    /// Resume recipes (TRUSTED user config): program basename -> argv to run
+    /// on restore instead of the captured command, so a program resumes its
+    /// own persisted state (e.g. claude -> `claude --continue`).
+    pub resume: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -301,7 +305,21 @@ fn spawn_command(
         argv.push(shell.clone());
     }
     if let Some(fg) = &pane.fg {
-        if restartable(fg, opts) {
+        // Resume recipe (trusted config) wins: run the user's resume argv in
+        // the pane's cwd so the program resumes its own state. Emitted as
+        // --exec-trusted so restore-pane skips the exec allow-list (which
+        // guards UNtrusted, save-derived argv, not user config).
+        if let Some(recipe) = fg
+            .argv
+            .first()
+            .map(|a| basename_lower(a))
+            .filter(|b| !b.is_empty())
+            .and_then(|b| opts.resume.get(&b))
+            .filter(|_| !argv_has_denied(&fg.argv))
+        {
+            argv.push("--exec-trusted".into());
+            argv.extend(recipe.iter().cloned());
+        } else if restartable(fg, opts) {
             argv.push("--exec".into());
             let mut exec_argv = fg.argv.clone();
             // Editor state: vim/nvim resume a Session.vim from the program's
@@ -431,6 +449,7 @@ mod tests {
             pretype_unrestored: false,
             shell: None,
             helper: "/usr/bin/hashterm".into(),
+            resume: std::collections::HashMap::new(),
         }
     }
 
@@ -557,6 +576,28 @@ mod tests {
             safe_scrollback_path(root, Path::new("../../etc/x.zst")),
             None
         );
+    }
+
+    #[test]
+    fn resume_recipe_overrides_captured_command() {
+        // A configured resume recipe runs its own argv via --exec-trusted,
+        // in preference to pre-typing / re-running the captured command.
+        let mut o = opts();
+        o.resume = [("claude".to_string(), vec![
+            "claude".to_string(),
+            "--continue".to_string(),
+        ])]
+        .into_iter()
+        .collect();
+        let p = pane(Some(FgProc {
+            name: "claude".into(),
+            argv: vec!["claude".into()],
+            cwd: "/home/u/proj".into(),
+        }));
+        let mut report = RestoreReport::default();
+        let cmd = spawn_command(&p, Path::new("/tmp/save"), &o, &mut report);
+        assert!(cmd.contains("'--exec-trusted' 'claude' '--continue'"), "{cmd}");
+        assert!(!cmd.contains("'--exec' "));
     }
 
     #[test]

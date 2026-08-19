@@ -300,7 +300,12 @@ pub struct SessionCfg {
     pub autosave_interval_secs: u64,
     /// Autosave snapshots retained.
     pub autosave_keep: u32,
+    /// Silently restore the newest save at startup when the server is empty.
+    /// Superseded by `prompt_on_start` unless that is false.
     pub restore_on_start: bool,
+    /// Browser-style: when the previous run ended UNCLEANLY (crash, kill,
+    /// reboot) and a recent save exists, ask whether to restore it at startup.
+    pub prompt_on_start: bool,
 }
 
 impl Default for SessionCfg {
@@ -309,6 +314,7 @@ impl Default for SessionCfg {
             autosave_interval_secs: 300,
             autosave_keep: 12,
             restore_on_start: false,
+            prompt_on_start: true,
         }
     }
 }
@@ -327,6 +333,12 @@ pub struct RestoreCfg {
     pub exclude_panes: Vec<String>,
     /// Cap captured scrollback lines per pane; 0 = unlimited.
     pub max_scrollback_lines: u32,
+    /// Resume recipes: program basename -> the argv to run on restore instead
+    /// of the captured command, so a program that persists its own state
+    /// resumes it (e.g. claude -> `claude --continue`) rather than starting
+    /// fresh. TRUSTED (user config): unlike a captured command from an
+    /// untrusted save, a recipe may run a program from anywhere on your PATH.
+    pub resume: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Default for RestoreCfg {
@@ -353,6 +365,12 @@ impl Default for RestoreCfg {
             pretype_unrestored: true,
             exclude_panes: Vec::new(),
             max_scrollback_lines: 0,
+            resume: [("claude".to_string(), vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+            ])]
+            .into_iter()
+            .collect(),
         }
     }
 }

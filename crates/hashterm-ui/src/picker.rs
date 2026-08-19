@@ -82,7 +82,7 @@ pub fn open(win: &Rc<MainWindow>) {
                         let label = gtk4::Label::builder()
                             .label(format!(
                                 "{}   {}   {} session(s){}",
-                                s.created_at,
+                                s.created_local,
                                 s.name,
                                 s.session_count,
                                 if s.auto { "   [autosave]" } else { "" }

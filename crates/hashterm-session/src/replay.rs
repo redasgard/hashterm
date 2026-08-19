@@ -45,6 +45,9 @@ pub fn run_restore_pane(
     scrollback: Option<&Path>,
     shell: Option<&str>,
     exec: Option<&[String]>,
+    // Trusted argv (from user config) skips the exec-dir allow-list; untrusted
+    // argv (from a save file) must resolve under a system dir.
+    trusted: bool,
 ) -> std::io::Error {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -79,16 +82,21 @@ pub fn run_restore_pane(
         let _ = out.flush();
     }
 
-    // exec() replaces this process; on success nothing below runs. Resolve
-    // and allow-list the target first; a rejected or unresolvable program
-    // falls through to a plain shell rather than running something untrusted.
-    let allowed = exec
-        .filter(|a| !a.is_empty())
-        .and_then(|argv| resolve_allowed(&argv[0]).map(|real| (real, argv)));
-    let err = if let Some((real, argv)) = allowed {
-        std::process::Command::new(real).args(&argv[1..]).exec()
+    // exec() replaces this process; on success nothing below runs.
+    let want_exec = exec.filter(|a| !a.is_empty());
+    // Trusted (user-config resume recipe): exec argv[0] via normal PATH lookup,
+    // no allow-list. Untrusted (save-derived): resolve and require a system dir.
+    let target = want_exec.and_then(|argv| {
+        if trusted {
+            Some((std::path::PathBuf::from(&argv[0]), argv))
+        } else {
+            resolve_allowed(&argv[0]).map(|real| (real, argv))
+        }
+    });
+    let err = if let Some((prog, argv)) = target {
+        std::process::Command::new(prog).args(&argv[1..]).exec()
     } else {
-        if exec.is_some_and(|a| !a.is_empty()) {
+        if want_exec.is_some() {
             eprintln!("hashterm: refusing to exec restored program outside system dirs");
         }
         let sh = shell

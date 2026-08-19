@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Yevhen <yevhen@redasgard.com>"]
+rust-version = "1.90"
+
+[workspace.dependencies]
+hashterm-core = { path = "crates/hashterm-core" }
+hashterm-tmux = { path = "crates/hashterm-tmux" }
+hashterm-session = { path = "crates/hashterm-session" }
+hashterm-platform = { path = "crates/hashterm-platform" }
+hashterm-ui = { path = "crates/hashterm-ui" }
+
+gtk4 = { version = "0.11", features = ["v4_18"] }
+vte4 = { version = "0.10", features = ["v0_84", "gtk_v4_18"] }
+gdk4-x11 = "0.11"
+gdk4-wayland = "0.11"
+gtk4-layer-shell = { version = "0.8", features = ["v1_3"] }
+# async-io feature -> zbus keeps its internal executor, so portal calls work
+# from the glib main loop without an ambient tokio runtime.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
+global-hotkey = "0.8"
+x11rb = "0.14"
+
+bitflags = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-channel = "2"
+zstd = "0.13"
+futures-util = "0.3"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

@@ -1,0 +1,22 @@
+[package]
+name = "hashterm-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hashterm-core = { workspace = true }
+gtk4 = { workspace = true }
+gdk4-x11 = { workspace = true }
+gdk4-wayland = { workspace = true }
+gtk4-layer-shell = { workspace = true }
+ashpd = { workspace = true }
+global-hotkey = { workspace = true }
+x11rb = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-channel = { workspace = true }
+futures-util = { workspace = true }

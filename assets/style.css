@@ -1,0 +1,102 @@
+/* hashterm base stylesheet (APPLICATION priority).
+   User overrides: ~/.config/hashterm/user.css (USER priority). */
+
+window.hashterm {
+  background-color: #1d1f21;
+  border-radius: 10px;
+}
+
+/* Quake-console mode: flush with the anchored screen edge (square corners
+   there), rounded at the free edge, with a subtle console lip. */
+window.hashterm.dropdown.edge-top {
+  border-radius: 0 0 10px 10px;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.16);
+}
+
+window.hashterm.dropdown.edge-bottom {
+  border-radius: 10px 10px 0 0;
+  border-top: 2px solid rgba(255, 255, 255, 0.16);
+}
+
+window.hashterm.dropdown.edge-left {
+  border-radius: 0 10px 10px 0;
+  border-right: 2px solid rgba(255, 255, 255, 0.16);
+}
+
+window.hashterm.dropdown.edge-right {
+  border-radius: 10px 0 0 10px;
+  border-left: 2px solid rgba(255, 255, 255, 0.16);
+}
+
+.tabbar {
+  background-color: #16181a;
+  padding: 2px;
+}
+
+/* Auto-hidden bar floats over the terminal: give it depth. */
+.overlaid .tabbar {
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+}
+
+/* Group bar: the matrix's second axis, perpendicular to the tab bar. */
+.groupbar {
+  background-color: #101214;
+  padding: 2px;
+}
+
+.group-row {
+  padding: 3px 10px;
+  border-radius: 6px;
+  color: #9da0a3;
+}
+
+.group-row:checked {
+  background-color: #2b2f33;
+  color: #ffffff;
+}
+
+.group-row.drag-over,
+.group-new.drag-over {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+.group-dot {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 5px;
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+/* Tab-switch OSD: centered translucent toast. */
+.tab-osd {
+  background-color: rgba(8, 10, 12, 0.62);
+  color: #f2f4f6;
+  border-radius: 14px;
+  padding: 16px 30px;
+  font-size: 19px;
+  font-weight: 600;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
+.tab {
+  padding: 3px 10px;
+  border-radius: 6px;
+  color: #b4b7ba;
+}
+
+.tab:checked {
+  background-color: #2b2f33;
+  color: #ffffff;
+}
+
+.tab.bell {
+  color: #e5c07b;
+}
+
+.tab.activity {
+  color: #61afef;
+}
+
+.tab.external {
+  color: #98c379;
+}

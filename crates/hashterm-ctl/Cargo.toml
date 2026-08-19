@@ -1,0 +1,17 @@
+[package]
+name = "hashterm-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# Spawned by tmux run-shell hooks, potentially often: keep dependencies minimal
+# (hashterm-core pulls serde/serde_json for the shared event types only).
+[[bin]]
+name = "hashterm-ctl"
+path = "src/main.rs"
+
+[dependencies]
+hashterm-core = { workspace = true }
+serde_json = { workspace = true }

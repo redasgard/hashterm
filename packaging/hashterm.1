@@ -1,0 +1,84 @@
+.TH HASHTERM 1 "August 2026" "hashterm 0.1.0" "User Commands"
+.SH NAME
+hashterm \- tmux\-native GUI terminal with saved sessions and a quake\-style drop\-down
+.SH SYNOPSIS
+.B hashterm
+[\fIOPTIONS\fR] [\fICOMMAND\fR]
+.SH DESCRIPTION
+.B hashterm
+is a frameless, tabbed terminal for Linux built on GTK4/VTE. Every tab is a
+session on a dedicated private tmux server, so terminals survive GUI crashes
+and detaches. Sessions can be fully dumped (layout, working directories,
+running programs, scrollback) and restored later, browser\-style.
+.PP
+The window behaves as a quake\-style console: a global hotkey (default
+\fBF12\fR) slides it from the screen edge and keeps it above other windows.
+Tabs are organized as a two\-dimensional \fImatrix\fR: groups (rows) on one
+window edge, the active group's terminals (columns) on the perpendicular
+edge.
+.SH OPTIONS
+.TP
+.BI \-\-config " FILE"
+Use an alternative configuration file.
+.TP
+.B \-\-toggle
+Toggle the drop\-down terminal of the running instance (or start one).
+.TP
+.B \-\-new\-tab
+Open a new tab in the running instance.
+.TP
+.BI \-\-cwd " DIR"
+Working directory for \fB\-\-new\-tab\fR.
+.TP
+.BI \-\-restore " NAME"
+Restore a named saved session in the GUI ("latest" resolves to the newest
+autosave).
+.TP
+.BR \-e ", " \-\-exec " \fICMD\fR..."
+Command to run in the new tab; consumes all following arguments.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print version.
+.SH COMMANDS
+.TP
+.B dump \fINAME\fR
+Headless full dump of the dedicated tmux server (also used internally by tmux
+hooks and the autosave timer).
+.TP
+.B restore \fINAME\fR
+Headless restore of a named save onto the dedicated tmux server.
+.TP
+.B saves
+List saved sessions.
+.SH KEYS
+Defaults (all configurable in \fI[hotkeys]\fR):
+\fBF12\fR toggle drop\-down;
+\fBCtrl+Shift+T\fR new tab; \fBCtrl+Shift+W\fR close tab;
+\fBCtrl+Home\fR/\fBEnd\fR previous/next terminal;
+\fBCtrl+PgUp\fR/\fBPgDn\fR previous/next group;
+\fBAlt+1..0\fR jump to tab;
+\fBCtrl+Shift+B\fR toggle tab bar; \fBCtrl+Shift+S\fR session picker;
+\fBCtrl+Shift+C\fR/\fBV\fR copy/paste;
+\fBCtrl+Alt+Shift+scroll\fR window opacity (remembered across restarts).
+Right\-click a tab or a group row for properties, group moves, rename and
+group color. Drag a tab onto another tab to reorder, onto a group row to move
+it there, onto the group bar's \fB+\fR to move it into a new group.
+.SH FILES
+.TP
+.I ~/.config/hashterm/config.toml
+Configuration; live\-reloaded on save. A fully commented reference is written
+here on first start.
+.TP
+.I ~/.config/hashterm/user.css
+Extra GTK CSS overrides.
+.TP
+.I ~/.local/share/hashterm/
+Saved sessions (dumps, autosaves) and UI state.
+.SH ENVIRONMENT
+The dedicated tmux server runs on socket \fBhashterm\fR
+(\fItmux \-L hashterm\fR attaches to it directly if needed).
+.SH SEE ALSO
+.BR tmux (1)

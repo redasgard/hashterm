@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=hashterm
+GenericName=Terminal
+Comment=tmux-native terminal with saved sessions and quake-style drop-down
+Exec=hashterm
+Icon=com.redasgard.Hashterm
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true
+DBusActivatable=true
+Actions=new-tab;toggle;
+
+[Desktop Action new-tab]
+Name=New Tab
+Exec=hashterm --new-tab
+
+[Desktop Action toggle]
+Name=Toggle Drop-down
+Exec=hashterm --toggle

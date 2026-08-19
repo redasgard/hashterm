@@ -1,0 +1,72 @@
+#!/bin/sh
+# Build the hashterm .deb from an existing release build.
+#   packaging/build-deb.sh            -> dist/hashterm_<version>_<arch>.deb
+# Requires: dpkg-deb, fakeroot, gzip; run `cargo build --release` first.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
+arch=$(dpkg --print-architecture)
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+pkg="$stage/hashterm"
+
+for bin in hashterm hashterm-ctl; do
+    [ -x "$root/target/release/$bin" ] || {
+        echo "missing target/release/$bin — run: cargo build --release" >&2
+        exit 1
+    }
+done
+
+install -Dm755 "$root/target/release/hashterm"     "$pkg/usr/bin/hashterm"
+install -Dm755 "$root/target/release/hashterm-ctl" "$pkg/usr/bin/hashterm-ctl"
+install -Dm644 "$root/assets/com.redasgard.Hashterm.desktop" \
+    "$pkg/usr/share/applications/com.redasgard.Hashterm.desktop"
+install -Dm644 "$root/assets/com.redasgard.Hashterm.svg" \
+    "$pkg/usr/share/icons/hicolor/scalable/apps/com.redasgard.Hashterm.svg"
+install -Dm644 "$root/packaging/hashterm.1" "$pkg/usr/share/man/man1/hashterm.1"
+gzip -9n "$pkg/usr/share/man/man1/hashterm.1"
+
+# DBusActivatable=true in the desktop file needs a matching service file; the
+# GApplication in the binary owns this bus name once started.
+install -d "$pkg/usr/share/dbus-1/services"
+printf '[D-BUS Service]\nName=com.redasgard.Hashterm\nExec=/usr/bin/hashterm\n' \
+    > "$pkg/usr/share/dbus-1/services/com.redasgard.Hashterm.service"
+
+install -d "$pkg/usr/share/doc/hashterm"
+cat > "$pkg/usr/share/doc/hashterm/copyright" <<EOF
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: hashterm
+Source: https://redasgard.com
+
+Files: *
+Copyright: 2026 Red Asgard <yevhen@redasgard.com>
+License: MIT
+EOF
+printf 'hashterm (%s-1) unstable; urgency=medium\n\n  * Initial release.\n\n -- Red Asgard <yevhen@redasgard.com>  Mon, 18 Aug 2026 00:00:00 +0000\n' \
+    "$version" > "$pkg/usr/share/doc/hashterm/changelog.Debian"
+gzip -9n "$pkg/usr/share/doc/hashterm/changelog.Debian"
+
+size=$(du -sk "$pkg" | cut -f1)
+install -d "$pkg/DEBIAN"
+cat > "$pkg/DEBIAN/control" <<EOF
+Package: hashterm
+Version: $version-1
+Section: x11
+Priority: optional
+Architecture: $arch
+Installed-Size: $size
+Maintainer: Red Asgard <yevhen@redasgard.com>
+Depends: libgtk-4-1 (>= 4.18), libvte-2.91-gtk4-0 (>= 0.84), libgtk4-layer-shell0, libglib2.0-0t64 (>= 2.80), tmux
+Recommends: xdg-desktop-portal, xclip | wl-clipboard | xsel
+Description: tmux-native terminal with saved sessions and quake drop-down
+ Frameless tabbed GTK4/VTE terminal. Every tab is a session on a dedicated
+ tmux server, so terminals survive GUI crashes. Full session dump/restore
+ (layout, cwds, programs, scrollback), a quake-style always-on-top drop-down
+ on a global hotkey, and a 2D tab matrix: groups on one edge, the active
+ group's terminals on the perpendicular one.
+EOF
+
+install -d "$root/dist"
+fakeroot dpkg-deb --build "$pkg" "$root/dist/hashterm_${version}-1_${arch}.deb"
+echo "built: dist/hashterm_${version}-1_${arch}.deb"

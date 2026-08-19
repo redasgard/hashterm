@@ -1,0 +1,19 @@
+[package]
+name = "hashterm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "hashterm"
+path = "src/main.rs"
+
+[dependencies]
+hashterm-core = { workspace = true }
+hashterm-session = { workspace = true }
+hashterm-tmux = { workspace = true }
+hashterm-ui = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }

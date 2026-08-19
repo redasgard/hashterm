@@ -1,0 +1,171 @@
+# hashterm configuration — ~/.config/hashterm/config.toml
+#
+# This file is LIVE-RELOADED: save it and most changes apply instantly
+# (font, colors, opacity, tab bar edge/auto-hide, hotkeys, dropdown geometry).
+# A file with errors is ignored and the previous config stays active.
+# Extra styling: put GTK CSS into ~/.config/hashterm/user.css.
+
+[general]
+# Shell to run in new tabs. Commented out = your login shell.
+# shell = "/usr/bin/zsh"
+# Run this command instead of a shell in new tabs (argv list).
+# default_command = ["htop"]
+# Closing a tab kills its tmux session. false = the session keeps running
+# detached on the server and re-appears as a tab on next start.
+close_kills_session = true
+# Ask before closing a tab whose pane has a foreground process running.
+confirm_close_running = true
+# New tabs start in the directory of the active tab.
+inherit_cwd = true
+# Launch without showing the console — the first F12 summons it.
+# Pairs well with autostart for a boot-ready quake terminal.
+start_hidden = false
+# Keep an XDG autostart entry (~/.config/autostart/) in sync with this flag,
+# so hashterm starts with your desktop session.
+autostart = false
+
+[appearance]
+font = "monospace 11"
+padding = 6
+# 0.0-1.0 terminal BACKGROUND transparency; text stays opaque. Try 0.9.
+# (Wayland always works; on X11 you need a compositor running.)
+opacity = 1.0
+# Tab bar background transparency, independent of the terminal. Try 0.5.
+tabbar_opacity = 1.0
+# WHOLE-WINDOW transparency — fades everything including text. Try 0.9.
+# Also adjustable live: hold Ctrl+Alt+Shift and scroll. The scrolled value is
+# remembered across restarts until you edit this setting, which then wins.
+window_opacity = 1.0
+# Accent border around the terminal for tabs that have an accent color
+# (double-click a tab to set name/color). 0 = underline on the tab only.
+tab_border_width = 2
+foreground = "#c5c8c6"
+background = "#1d1f21"
+bold_is_bright = true
+
+[tabbar]
+# Where the tab bar lives: "top" | "bottom" | "left" | "right".
+edge = "top"
+# true = bar stays hidden; hover the window edge (2px strip) to reveal it.
+# Ctrl+Shift+B toggles it manually at any time.
+auto_hide = false
+# Reveal/conceal animation duration (ms).
+reveal_ms = 180
+# Left/right edges: "cards" (180px title cards) or "compact" (narrow rail).
+side_style = "cards"
+show_close = true
+# Keep the bar revealed while a tab has a bell/activity badge.
+reveal_on_badge = true
+# Centered translucent popup showing "name · 2/3" after switching tabs.
+switch_osd = true
+
+[groupbar]
+# The tab MATRIX: groups (workspaces) on one edge, the active group's tabs on
+# the perpendicular edge. Click a group to switch rows; drop a tab onto a
+# group to move it there.
+# Unset = automatically perpendicular to the tab bar. The matrix needs two
+# perpendicular axes, so an edge parallel to tabbar.edge is ignored (with a
+# warning) in favor of the automatic choice.
+# edge = "top"
+# Hide the group bar while only one group exists.
+hide_when_single = true
+# Show tab counts next to group names.
+show_counts = true
+# Reveal/conceal animation duration (ms).
+reveal_ms = 150
+
+[scrollback]
+# Applied as tmux history-limit on the dedicated server (new panes).
+lines = 50000
+
+[dropdown]
+# Quake-style mode for the F12 toggle. With enabled = false the toggle just
+# shows/hides the window without placement/animation.
+enabled = true
+edge = "top"
+width_pct = 1.0
+# Default console height as a fraction of the monitor...
+height_pct = 0.45
+# ...or pin it exactly: "600px" or "45%". When unset, hashterm REMEMBERS the
+# height you last resized to and restores it on the next start.
+# height = "600px"
+animation_ms = 150
+# "focused" | "primary"  (or a specific output: monitor = { connector = "DP-1" })
+monitor = "focused"
+# Hide the terminal when it loses focus — the classic quake feel. Recommended
+# on GNOME Wayland, where windows cannot stay always-on-top.
+hide_on_focus_loss = false
+# Wayland layer-shell only (sway/hyprland/KDE): "top" or "overlay"
+# ("overlay" also covers fullscreen windows). GNOME ignores this.
+layer = "top"
+# Respect panels/docks (layer-shell exclusive zones).
+respect_panels = true
+# GNOME Wayland cannot keep native windows above others, so hashterm runs
+# through XWayland there (like tilda/guake) where keep-above works. Costs:
+# slight blur with fractional display scaling. false = stay native Wayland
+# (no always-on-top on GNOME).
+prefer_xwayland = true
+
+[hotkeys]
+# The global toggle. Sources tried in order: desktop portal (GNOME/KDE ask
+# once for approval; GNOME Settings > Keyboard > "hashterm" to change it
+# later), then XGrabKey on X11, else bind `hashterm --toggle` yourself in
+# your desktop's keyboard settings. Inside the terminal the same key is
+# grabbed by the window, so it never reaches the shell.
+toggle_dropdown = "F12"
+# GTK accelerator syntax: "<Ctrl><Shift>t", "<Alt>F4", "F11", "<Super>Return".
+new_tab = "<Ctrl><Shift>t"
+close_tab = "<Ctrl><Shift>w"
+# The tab MATRIX: Ctrl+Home/End moves across the active group's terminals
+# (columns); Ctrl+PgUp/PgDn moves between groups (rows) — see next_group.
+next_tab = "<Ctrl>End"
+prev_tab = "<Ctrl>Home"
+toggle_tabbar = "<Ctrl><Shift>b"
+session_picker = "<Ctrl><Shift>s"
+copy = "<Ctrl><Shift>c"
+# Shift+Insert always pastes too.
+paste = "<Ctrl><Shift>v"
+# Opens THIS file in your default editor (also in the tab bar's right-click
+# menu). Changes apply live on save.
+open_config = "<Ctrl>comma"
+# Jump straight to a tab: <mod>+1..9, <mod>+0 = tab 10. "" disables (frees
+# Alt+digits for terminal apps).
+goto_tab_modifier = "<Alt>"
+# Cycle tab groups (matrix rows) — the tab bar shows only the active group's
+# tabs; the group bar (see [groupbar]) lists the groups on the perpendicular
+# edge. Manage groups via the group bar or a tab's right-click menu.
+next_group = "<Ctrl>Page_Down"
+prev_group = "<Ctrl>Page_Up"
+
+[session]
+# Full dump (layout + cwds + scrollback) every N seconds; 0 disables.
+# Autosaves rotate; named saves via the Ctrl+Shift+S picker never expire.
+autosave_interval_secs = 300
+autosave_keep = 12
+# Restore the newest autosave at startup when the server has no sessions.
+restore_on_start = false
+
+[restore]
+# Programs restarted automatically on restore (matched by basename).
+# sudo/su/passwd and friends are always refused.
+programs = [
+    "vim", "nvim", "htop", "btop", "top", "tail", "watch",
+    "journalctl", "man", "less", "ssh", "lazygit", "k9s",
+]
+# true = restart ANY captured command on restore (careful).
+restart_arbitrary = false
+# Browser-style restore: panes whose program was NOT auto-restarted come back
+# with the captured command pre-typed at the prompt — press Enter to re-run.
+pretype_unrestored = true
+# Skip scrollback capture for matching panes: "title:GLOB" or "cmd:GLOB".
+# exclude_panes = ["cmd:gpg", "title:secret*"]
+exclude_panes = []
+# Cap captured scrollback lines per pane; 0 = everything.
+max_scrollback_lines = 0
+
+[tmux]
+# true = stock tmux window keybindings inside a tab (re-enables the tmux
+# status line; prefix-c makes tmux windows instead of hashterm tabs).
+native_windows = false
+# Sourced after the bundled tmux config on the dedicated server.
+# extra_conf = "/home/you/.config/hashterm/extra.tmux.conf"

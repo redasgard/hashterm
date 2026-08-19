@@ -149,6 +149,10 @@ impl MainWindow {
         hover_strip.set_visible(false);
 
         let overlay = gtk4::Overlay::builder().child(&grid).build();
+        // The console's visible body: background/corners/lip live HERE, on
+        // the widget the SlidePanel translates — never on the window node
+        // (see css.rs) — so show/hide reads as the console itself sliding.
+        overlay.add_css_class("console-body");
         overlay.add_overlay(&hover_strip);
         csd::add_resize_handles(&overlay, &window);
 

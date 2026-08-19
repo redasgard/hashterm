@@ -1,29 +1,36 @@
 /* hashterm base stylesheet (APPLICATION priority).
    User overrides: ~/.config/hashterm/user.css (USER priority). */
 
+/* The window node itself is TRANSPARENT: everything visible is painted on
+   .console-body, the widget the SlidePanel translates, so the whole console
+   (background included) slides as one piece. */
 window.hashterm {
+  background: transparent;
+}
+
+.console-body {
   background-color: #1d1f21;
   border-radius: 10px;
 }
 
 /* Quake-console mode: flush with the anchored screen edge (square corners
    there), rounded at the free edge, with a subtle console lip. */
-window.hashterm.dropdown.edge-top {
+window.hashterm.dropdown.edge-top .console-body {
   border-radius: 0 0 10px 10px;
   border-bottom: 2px solid rgba(255, 255, 255, 0.16);
 }
 
-window.hashterm.dropdown.edge-bottom {
+window.hashterm.dropdown.edge-bottom .console-body {
   border-radius: 10px 10px 0 0;
   border-top: 2px solid rgba(255, 255, 255, 0.16);
 }
 
-window.hashterm.dropdown.edge-left {
+window.hashterm.dropdown.edge-left .console-body {
   border-radius: 0 10px 10px 0;
   border-right: 2px solid rgba(255, 255, 255, 0.16);
 }
 
-window.hashterm.dropdown.edge-right {
+window.hashterm.dropdown.edge-right .console-body {
   border-radius: 10px 0 0 10px;
   border-left: 2px solid rgba(255, 255, 255, 0.16);
 }

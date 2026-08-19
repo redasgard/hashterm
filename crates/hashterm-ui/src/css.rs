@@ -57,8 +57,13 @@ impl Styles {
             g.saturating_sub(7),
             b.saturating_sub(7),
         );
+        // The background lives on .console-body — the widget the SlidePanel
+        // translates — NOT on the window node. A window-node background stays
+        // put while the content slides, which broke the quake illusion (the
+        // window rectangle popped in before the slide / lingered after it).
         let css = format!(
-            "window.hashterm {{ background-color: rgba({r},{g},{b},{alpha}); }}\n\
+            "window.hashterm {{ background: transparent; }}\n\
+             .console-body {{ background-color: rgba({r},{g},{b},{alpha}); }}\n\
              .tabbar {{ background-color: rgba({tr},{tg},{tb},{bar_alpha}); }}\n\
              .terminal-page {{ padding: {}px; background: transparent; }}\n",
             a.padding

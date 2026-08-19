@@ -74,14 +74,14 @@ window.hashterm.dropdown.edge-right .console-body {
   background-color: rgba(255, 255, 255, 0.25);
 }
 
-/* Tab-switch OSD: centered translucent toast. The box holds either a single
-   message line or a prev/current/next "wheel". */
+/* Tab-switch OSD: a near-solid rounded panel so the terminal behind never
+   bleeds through. Holds a single message line or a prev/current/next wheel. */
 .tab-osd {
-  background-color: rgba(8, 10, 12, 0.62);
-  color: #f2f4f6;
-  border-radius: 14px;
-  padding: 14px 30px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  background-color: rgba(22, 25, 30, 0.96);
+  color: #f4f6f8;
+  border-radius: 16px;
+  padding: 12px 44px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55);
 }
 
 /* Generic single-line message. */
@@ -90,17 +90,27 @@ window.hashterm.dropdown.edge-right .console-body {
   font-weight: 600;
 }
 
-/* Wheel: current tab bright and large in the middle... */
+/* Dial: current tab bright and large in the middle... */
 .osd-current {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 700;
+  margin: 1px 0;
 }
 
-/* ...prev/next tabs smaller and "half visible" above and below. */
+/* ...immediate neighbors smaller and dimmer... */
 .osd-neighbor {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 400;
   opacity: 0.5;
+  margin: 0;
+}
+
+/* ...and the next ring out smaller and fainter still (receding). */
+.osd-far {
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.22;
+  margin: 0;
 }
 
 .tab {

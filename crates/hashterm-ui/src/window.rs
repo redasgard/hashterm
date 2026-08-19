@@ -15,6 +15,40 @@ use std::sync::atomic::AtomicBool;
 /// final snapshot before exit. Only an atomic store happens in signal context.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// A receding neighbor row of the tab dial. `distance` is 1 for an immediate
+/// neighbor, 2 for the one beyond it (smaller, fainter).
+fn osd_neighbor_label(text: &str, distance: usize) -> gtk4::Label {
+    let label = gtk4::Label::builder()
+        .label(text)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .max_width_chars(48)
+        .halign(gtk4::Align::Center)
+        .build();
+    label.add_css_class(if distance >= 2 {
+        "osd-far"
+    } else {
+        "osd-neighbor"
+    });
+    label
+}
+
+/// The center row of the wheel: bright title with a small, dim "i/N" suffix.
+fn osd_current_label(title: &str, i: usize, n: usize) -> gtk4::Label {
+    let markup = format!(
+        "{}  <span size='small' foreground='#9aa1ab'>{i}/{n}</span>",
+        gtk4::glib::markup_escape_text(title)
+    );
+    let label = gtk4::Label::builder()
+        .use_markup(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .max_width_chars(48)
+        .halign(gtk4::Align::Center)
+        .build();
+    label.set_markup(&markup);
+    label.add_css_class("osd-current");
+    label
+}
+
 extern "C" fn handle_shutdown_signal(_sig: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
@@ -930,16 +964,23 @@ impl MainWindow {
         };
 
         self.osd_clear();
-        // Prev / next wrap around like a real wheel; skip when there's only
-        // one tab (no neighbors to show).
-        if n > 1 {
-            let prev = title_of((i + n - 1) % n);
-            self.osd_add_row(&prev, "osd-neighbor");
+        // A dial: the current tab large in the middle, and neighbors receding
+        // above and below — smaller and fainter the further out, so they read
+        // as rotating into the distance. Reach ±2 once there are enough tabs
+        // to keep every ring a distinct tab (avoids duplicates on small sets).
+        let radius = if n >= 5 { 2 } else { 1 };
+        for k in (1..=radius).rev() {
+            if n > 1 {
+                self.osd_content
+                    .append(&osd_neighbor_label(&title_of((i + n - k) % n), k));
+            }
         }
-        self.osd_add_row(&format!("{}   ·   {}/{}", title_of(i), i + 1, n), "osd-current");
-        if n > 1 {
-            let next = title_of((i + 1) % n);
-            self.osd_add_row(&next, "osd-neighbor");
+        self.osd_content.append(&osd_current_label(&title_of(i), i + 1, n));
+        for k in 1..=radius {
+            if n > 1 {
+                self.osd_content
+                    .append(&osd_neighbor_label(&title_of((i + k) % n), k));
+            }
         }
         self.reveal_osd(900);
     }
@@ -947,17 +988,6 @@ impl MainWindow {
     /// Generic centered toast — one line (group switch, opacity, errors, ...).
     pub fn show_osd_message(self: &Rc<Self>, text: &str, millis: u64) {
         self.osd_clear();
-        self.osd_add_row(text, "osd-msg");
-        self.reveal_osd(millis);
-    }
-
-    fn osd_clear(&self) {
-        while let Some(child) = self.osd_content.first_child() {
-            self.osd_content.remove(&child);
-        }
-    }
-
-    fn osd_add_row(&self, text: &str, class: &str) {
         let label = gtk4::Label::builder()
             .label(text)
             .ellipsize(gtk4::pango::EllipsizeMode::End)
@@ -965,8 +995,15 @@ impl MainWindow {
             .justify(gtk4::Justification::Center)
             .halign(gtk4::Align::Center)
             .build();
-        label.add_css_class(class);
+        label.add_css_class("osd-msg");
         self.osd_content.append(&label);
+        self.reveal_osd(millis);
+    }
+
+    fn osd_clear(&self) {
+        while let Some(child) = self.osd_content.first_child() {
+            self.osd_content.remove(&child);
+        }
     }
 
     fn reveal_osd(self: &Rc<Self>, millis: u64) {

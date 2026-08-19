@@ -102,7 +102,9 @@ pub struct MainWindow {
     opacity_save_timer: std::cell::Cell<Option<gtk4::glib::SourceId>>,
     /// Centered fade-out toast shown after tab switches.
     osd_revealer: gtk4::Revealer,
-    osd_label: gtk4::Label,
+    /// The toast body: rebuilt per show — one line for a message, or a
+    /// prev/current/next wheel for a tab switch.
+    osd_content: gtk4::Box,
     osd_timeout: std::cell::Cell<Option<gtk4::glib::SourceId>>,
     /// Generated per-accent-color CSS rules (tab underline, terminal rings).
     accent_css: gtk4::CssProvider,
@@ -167,16 +169,16 @@ impl MainWindow {
         csd::add_resize_handles(&overlay, &window);
 
         // Tab-switch OSD: centered translucent toast, click-through, faded
-        // in/out by a crossfade Revealer.
-        let osd_label = gtk4::Label::builder()
-            .wrap(true)
-            .wrap_mode(gtk4::pango::WrapMode::WordChar)
-            .max_width_chars(52)
-            .justify(gtk4::Justification::Center)
+        // in/out by a crossfade Revealer. The content box holds either a
+        // single message line or a prev/current/next wheel.
+        let osd_content = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(2)
+            .halign(gtk4::Align::Center)
             .build();
-        osd_label.add_css_class("tab-osd");
+        osd_content.add_css_class("tab-osd");
         let osd_revealer = gtk4::Revealer::builder()
-            .child(&osd_label)
+            .child(&osd_content)
             .transition_type(gtk4::RevealerTransitionType::Crossfade)
             .transition_duration(150)
             .reveal_child(false)
@@ -226,7 +228,7 @@ impl MainWindow {
             opacity_override: std::cell::Cell::new(ui_state.window_opacity),
             opacity_save_timer: std::cell::Cell::new(None),
             osd_revealer,
-            osd_label,
+            osd_content,
             osd_timeout: std::cell::Cell::new(None),
             accent_css: {
                 let provider = gtk4::CssProvider::new();
@@ -903,6 +905,8 @@ impl MainWindow {
     }
 
     /// Centered "name · 2/3" toast, scoped to the active group.
+    /// Tab-switch OSD as a scroll-wheel: the current tab bright in the center
+    /// with its "i/N" counter, and the prev/next tabs faded above and below.
     fn show_tab_osd(self: &Rc<Self>) {
         if !self.config.borrow().tabbar.switch_osd {
             return;
@@ -914,19 +918,58 @@ impl MainWindow {
         let Some(i) = visible.iter().position(|s| s == name.as_str()) else {
             return;
         };
-        let title = self
-            .tabs
-            .borrow()
-            .iter()
-            .find(|t| t.session == name.as_str())
-            .map(|t| t.title.clone())
-            .unwrap_or_default();
-        self.show_osd_message(&format!("{title}   ·   {}/{}", i + 1, visible.len()), 900);
+        let n = visible.len();
+        let title_of = |idx: usize| -> String {
+            let session = &visible[idx];
+            self.tabs
+                .borrow()
+                .iter()
+                .find(|t| &t.session == session)
+                .map(|t| t.title.clone())
+                .unwrap_or_default()
+        };
+
+        self.osd_clear();
+        // Prev / next wrap around like a real wheel; skip when there's only
+        // one tab (no neighbors to show).
+        if n > 1 {
+            let prev = title_of((i + n - 1) % n);
+            self.osd_add_row(&prev, "osd-neighbor");
+        }
+        self.osd_add_row(&format!("{}   ·   {}/{}", title_of(i), i + 1, n), "osd-current");
+        if n > 1 {
+            let next = title_of((i + 1) % n);
+            self.osd_add_row(&next, "osd-neighbor");
+        }
+        self.reveal_osd(900);
     }
 
-    /// Generic centered toast (tab switches, config errors, ...).
+    /// Generic centered toast — one line (group switch, opacity, errors, ...).
     pub fn show_osd_message(self: &Rc<Self>, text: &str, millis: u64) {
-        self.osd_label.set_text(text);
+        self.osd_clear();
+        self.osd_add_row(text, "osd-msg");
+        self.reveal_osd(millis);
+    }
+
+    fn osd_clear(&self) {
+        while let Some(child) = self.osd_content.first_child() {
+            self.osd_content.remove(&child);
+        }
+    }
+
+    fn osd_add_row(&self, text: &str, class: &str) {
+        let label = gtk4::Label::builder()
+            .label(text)
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(52)
+            .justify(gtk4::Justification::Center)
+            .halign(gtk4::Align::Center)
+            .build();
+        label.add_css_class(class);
+        self.osd_content.append(&label);
+    }
+
+    fn reveal_osd(self: &Rc<Self>, millis: u64) {
         self.osd_revealer.set_reveal_child(true);
         if let Some(id) = self.osd_timeout.take() {
             id.remove();

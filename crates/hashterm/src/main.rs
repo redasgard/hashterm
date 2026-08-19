@@ -16,6 +16,12 @@ struct Cli {
     #[arg(long)]
     toggle: bool,
 
+    /// Replace the running GUI with a fresh instance (e.g. after an upgrade).
+    /// Your terminals live on the tmux server, so they survive and are
+    /// re-adopted; nothing is lost.
+    #[arg(long)]
+    restart: bool,
+
     /// Open a new tab in the running instance.
     #[arg(long)]
     new_tab: bool,
@@ -102,6 +108,12 @@ fn main() -> std::process::ExitCode {
         );
         eprintln!("hashterm restore-pane: {err}");
         return std::process::ExitCode::FAILURE;
+    }
+
+    // Restart is handled before any GTK/GApplication setup: terminate the
+    // running instance and re-launch a detached fresh one.
+    if cli.restart {
+        return run_restart(cli.config.as_deref());
     }
 
     hashterm_core::init_logging();
@@ -290,6 +302,70 @@ fn run_restore(
         }
         Err(e) => {
             eprintln!("hashterm restore: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--restart`: stop the running GUI (gracefully, so it snapshots) and launch
+/// a fresh detached instance. Terminals live on the tmux server, which stays
+/// up, so the new instance simply re-adopts them.
+fn run_restart(config: Option<&std::path::Path>) -> std::process::ExitCode {
+    use std::os::unix::process::CommandExt;
+
+    let alive = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    // Only signal a PID that is actually a hashterm: a stale lock's PID may
+    // have been reused by an unrelated process, and we must never SIGTERM that.
+    let is_hashterm = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|c| c.trim() == "hashterm")
+            .unwrap_or(false)
+    };
+    let self_pid = std::process::id();
+    if let Some(pid) = hashterm_core::state::running_pid()
+        && pid != self_pid
+        && alive(pid)
+        && is_hashterm(pid)
+    {
+        eprintln!("hashterm: stopping running instance (pid {pid})");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        // Wait for it to exit and release the session-bus name (up to ~6s).
+        let mut waited = 0;
+        while alive(pid) && waited < 60 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            waited += 1;
+        }
+        if alive(pid) {
+            eprintln!("hashterm: instance did not exit in time; forcing");
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hashterm"));
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(c) = config {
+        cmd.arg("--config").arg(c);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Detach into a new session so the fresh GUI outlives this CLI and its
+    // controlling terminal (which is a tmux pane of the instance we just
+    // killed).
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            eprintln!("hashterm: started fresh instance (pid {})", child.id());
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("hashterm: could not start new instance: {e}");
             std::process::ExitCode::FAILURE
         }
     }

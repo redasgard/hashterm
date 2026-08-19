@@ -135,7 +135,8 @@ impl TmuxController {
             return Err(TmuxError::Parse(id));
         }
         let sid = TmuxSessionId(id);
-        self.run(&["set-option", "-t", &sid.0, TITLE_OPTION, &opts.title])?;
+        let title = sanitize_option_value(&opts.title);
+        self.run(&["set-option", "-t", &sid.0, TITLE_OPTION, &title])?;
         // Group set at creation so the tab never flashes in the wrong group.
         if let Some(group) = opts.group.as_deref() {
             self.set_group(&sid, Some(group))?;
@@ -248,7 +249,11 @@ impl TmuxController {
             else {
                 return Err(TmuxError::Parse(line.into()));
             };
-            let title = parts.next().unwrap_or("").to_owned();
+            // Sanitize the title at the read boundary too: a newline set
+            // directly on the shared server (or restored from a hostile save)
+            // would otherwise spill a second line into `list-sessions -F`
+            // output and break parsing of every session after it.
+            let title = sanitize_option_value(parts.next().unwrap_or(""));
             if !name.starts_with(SESSION_PREFIX) {
                 continue;
             }

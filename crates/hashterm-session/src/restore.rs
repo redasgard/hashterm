@@ -216,7 +216,10 @@ fn restore_session(
         }
     }
 
-    ctl.run(&["set-option", "-t", name, TITLE_OPTION, &session.title])?;
+    // Sanitize the manifest-supplied title (untrusted save): a newline would
+    // break list_sessions parsing after restore.
+    let title = hashterm_tmux::controller::sanitize_option_value(&session.title);
+    ctl.run(&["set-option", "-t", name, TITLE_OPTION, &title])?;
     if session.title_custom {
         ctl.run(&["set-option", "-t", name, TITLE_CUSTOM_OPTION, "1"])?;
     }

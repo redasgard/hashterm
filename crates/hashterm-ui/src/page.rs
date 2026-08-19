@@ -136,21 +136,28 @@ impl TerminalPage {
 
     pub fn paste_clipboard(&self) {
         // Guard against paste-injection: clipboard content with a newline
-        // executes as soon as it lands. Read the text ourselves, and if it
-        // carries a newline (or other control byte), confirm before feeding.
+        // executes as soon as it lands. Inspect the text first; if it carries
+        // a newline (or other control byte), confirm before pasting. The paste
+        // itself always goes through VTE's paste_clipboard(), which preserves
+        // bracketed-paste framing (the standard defense) — never a raw
+        // feed_child, which would strip it and be MORE dangerous.
         let term = self.term.clone();
         let clipboard = term.clipboard();
         clipboard.read_text_async(gtk4::gio::Cancellable::NONE, move |res| {
-            let Ok(Some(text)) = res else { return };
-            let text = text.to_string();
+            let Ok(Some(text)) = res else {
+                // Couldn't inspect (e.g. non-text clipboard): fall back to the
+                // normal, bracketed paste.
+                term.paste_clipboard();
+                return;
+            };
             let risky = text
                 .chars()
                 .any(|c| c == '\n' || (c.is_control() && c != '\t'));
             if !risky {
-                term.feed_child(text.as_bytes());
+                term.paste_clipboard();
                 return;
             }
-            confirm_multiline_paste(&term, text);
+            confirm_multiline_paste(&term, text.lines().count());
         });
     }
 }
@@ -174,9 +181,10 @@ fn env_is_denied(key: &str) -> bool {
     )
 }
 
-/// Modal "this paste has newlines — run it?" confirmation. On confirm the raw
-/// bytes are fed to the child; on cancel nothing happens.
-fn confirm_multiline_paste(term: &vte4::Terminal, text: String) {
+/// Modal "this paste has newlines — run it?" confirmation. On confirm the
+/// clipboard is pasted normally (bracketed-paste preserved); on cancel nothing
+/// happens.
+fn confirm_multiline_paste(term: &vte4::Terminal, lines: usize) {
     let root = term.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
     let dialog = gtk4::Window::builder()
         .modal(true)
@@ -191,7 +199,7 @@ fn confirm_multiline_paste(term: &vte4::Terminal, text: String) {
     root_box.set_margin_bottom(14);
     root_box.set_margin_start(14);
     root_box.set_margin_end(14);
-    let lines = text.lines().count().max(1);
+    let lines = lines.max(1);
     root_box.append(
         &gtk4::Label::builder()
             .label(format!(
@@ -220,7 +228,8 @@ fn confirm_multiline_paste(term: &vte4::Terminal, text: String) {
         let dialog = dialog.clone();
         let term = term.clone();
         move |_| {
-            term.feed_child(text.as_bytes());
+            // Bracketed-paste preserved: re-read the clipboard through VTE.
+            term.paste_clipboard();
             dialog.close();
         }
     });

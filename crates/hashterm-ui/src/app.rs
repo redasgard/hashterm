@@ -110,8 +110,9 @@ fn ensure_window(
     *window.borrow_mut() = Some(win.clone());
 
     // Debug aid: HASHTERM_SHOT=/path.png renders the window content to a PNG
-    // (offscreen GSK render of the widget tree) 3s after startup.
-    if let Some(path) = std::env::var_os("HASHTERM_SHOT") {
+    // (offscreen GSK render of the widget tree) 3s after startup. Debug-only:
+    // in a release binary an attacker-set env must not choose an output path.
+    if let Some(path) = std::env::var_os("HASHTERM_SHOT").filter(|_| cfg!(debug_assertions)) {
         let w = Rc::downgrade(&win);
         let path = std::path::PathBuf::from(path);
         glib::timeout_add_seconds_local(3, move || {
@@ -123,7 +124,7 @@ fn ensure_window(
     }
 
     // Debug aid: HASHTERM_GEOMETRY=1 logs the allocation chain periodically.
-    if std::env::var_os("HASHTERM_GEOMETRY").is_some() {
+    if cfg!(debug_assertions) && std::env::var_os("HASHTERM_GEOMETRY").is_some() {
         let w = Rc::downgrade(&win);
         glib::timeout_add_seconds_local(2, move || match w.upgrade() {
             Some(w) => {
@@ -149,22 +150,33 @@ fn sync_autostart(enabled: bool) {
     let dir = glib::user_config_dir().join("autostart");
     let path = dir.join("com.redasgard.Hashterm.desktop");
     if enabled {
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "hashterm".into());
-        let entry = format!(
-            "[Desktop Entry]\n\
+        // Hard-coded `Exec=hashterm` (resolved via PATH): never interpolate
+        // current_exe(), whose path needs XDG quoting and could carry a
+        // newline that injects extra desktop-entry keys.
+        let entry = "[Desktop Entry]\n\
              Type=Application\n\
              Name=hashterm\n\
              Comment=tmux-native drop-down terminal\n\
-             Exec={exe}\n\
+             Exec=hashterm\n\
              Terminal=false\n\
-             X-GNOME-Autostart-enabled=true\n"
-        );
-        let up_to_date = std::fs::read_to_string(&path).ok().as_deref() == Some(entry.as_str());
+             X-GNOME-Autostart-enabled=true\n";
+        let up_to_date = std::fs::read_to_string(&path).ok().as_deref() == Some(entry);
         if !up_to_date {
-            if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, entry))
-            {
+            let write = || -> std::io::Result<()> {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::create_dir_all(&dir)?;
+                // O_NOFOLLOW: refuse to write through a symlink planted at the
+                // autostart path.
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&path)?;
+                f.write_all(entry.as_bytes())
+            };
+            if let Err(e) = write() {
                 tracing::error!("cannot write autostart entry {}: {e}", path.display());
             } else {
                 tracing::info!("autostart enabled: {}", path.display());

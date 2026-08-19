@@ -1013,6 +1013,7 @@ dependencies = [
  "hashterm-platform",
  "hashterm-session",
  "hashterm-tmux",
+ "libc",
  "tracing",
  "vte4",
 ]

@@ -25,7 +25,7 @@ gtk4-layer-shell = { version = "0.8", features = ["v1_3"] }
 # from the glib main loop without an ambient tokio runtime.
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 global-hotkey = "0.8"
-x11rb = "0.14"
+x11rb = "0.13"
 
 bitflags = "2"
 serde = { version = "1", features = ["derive"] }

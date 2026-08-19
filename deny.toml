@@ -6,9 +6,10 @@
 yanked = "deny"
 
 [bans]
-# Flag duplicate versions of the same crate (e.g. x11rb 0.13 + 0.14) so the
-# dependency surface stays minimal. Downgrade to "warn" if a transitive pin
-# can't be collapsed yet.
+# Surface duplicate crate versions. Our direct picks are unified (x11rb is
+# pinned to 0.13 to match global-hotkey); the remaining duplicates (syn, toml,
+# windows-sys, …) are unavoidable transitive splits in the gtk-rs stack, so
+# this stays a warning rather than "deny".
 multiple-versions = "warn"
 wildcards = "deny"
 

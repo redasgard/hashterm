@@ -37,7 +37,9 @@ pub fn install_conf(
         );
     }
     if let Some(extra) = extra_conf {
-        conf.push_str(&format!("\nsource-file {}\n", extra.display()));
+        // Single-quote the path so spaces / tmux specials don't misparse.
+        let quoted = extra.display().to_string().replace('\'', "'\\''");
+        conf.push_str(&format!("\nsource-file '{quoted}'\n"));
     }
     let path = data_dir.join("hashterm.tmux.conf");
     // Rewrite only on content change so tmux never sees a partial file.

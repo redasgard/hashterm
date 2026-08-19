@@ -43,17 +43,11 @@ pub fn socket_path() -> PathBuf {
     dir.join("ipc.sock")
 }
 
-// Minimal uid read without a libc dependency: parse /proc/self/status Uid line.
 fn uid() -> u32 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1).map(str::to_owned))
-        })
-        .and_then(|u| u.parse().ok())
-        .unwrap_or(0)
+    // getuid() never fails; the old /proc parse fell back to 0 (root) on any
+    // read failure, collapsing every user onto /tmp/hashterm-0.
+    // SAFETY: getuid takes no arguments and cannot fail.
+    unsafe { libc::getuid() }
 }
 
 #[cfg(test)]

@@ -450,12 +450,20 @@ impl Config {
     /// Write the commented default config if none exists yet, so users have a
     /// discoverable, documented file to edit. Errors are non-fatal.
     pub fn install_default_file() -> Option<PathBuf> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         let path = Self::default_path();
-        if path.exists() {
-            return None;
-        }
         std::fs::create_dir_all(Self::config_dir()).ok()?;
-        std::fs::write(&path, Self::DEFAULT_TOML).ok()?;
+        // create_new + O_NOFOLLOW: only ever create a fresh regular file. If
+        // something (a symlink to ~/.bashrc, an existing config) is already
+        // there, do nothing — never clobber or write through a symlink.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .ok()?;
+        f.write_all(Self::DEFAULT_TOML.as_bytes()).ok()?;
         Some(path)
     }
 

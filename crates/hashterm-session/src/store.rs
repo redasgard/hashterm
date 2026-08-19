@@ -10,8 +10,35 @@
 
 use crate::schema::{DumpManifest, SCHEMA_VERSION};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+/// A save is untrusted input (it may be shared or dropped in). Bound it so a
+/// hostile manifest can't exhaust memory or stall restore with a huge fan-out.
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SESSIONS: usize = 256;
+const MAX_WINDOWS: usize = 256;
+const MAX_PANES: usize = 256;
+
+/// Create a directory (and parents) with mode 0700 from the start — never
+/// world-visible even briefly (avoids the create-then-chmod TOCTOU).
+fn create_dir_700(path: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+}
+
+/// Tighten an existing dir to 0700, but only if it is a real directory — never
+/// follow a planted symlink to chmod its target.
+fn harden_existing_dir(path: &Path) {
+    if let Ok(md) = fs::symlink_metadata(path)
+        && md.file_type().is_dir()
+    {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -33,6 +60,8 @@ pub enum StoreError {
     NotFound(String),
     #[error("invalid save name '{0}' (no slashes or dots allowed)")]
     BadName(String),
+    #[error("save '{name}' is too large or has too many {what}")]
+    TooLarge { name: String, what: &'static str },
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
@@ -87,16 +116,16 @@ impl SessionStore {
     pub fn begin(&self, name: &str, auto: bool) -> Result<PathBuf, StoreError> {
         Self::validate_name(name)?;
         let parent = self.root.join(if auto { "autosave" } else { "sessions" });
-        fs::create_dir_all(&parent).map_err(io_err(&parent))?;
-        fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700))
-            .map_err(io_err(&self.root))?;
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).map_err(io_err(&parent))?;
+        create_dir_700(&parent).map_err(io_err(&parent))?;
+        // Tighten root/parent if a prior version created them world-readable,
+        // without following a symlink planted at either path.
+        harden_existing_dir(&self.root);
+        harden_existing_dir(&parent);
         let tmp = parent.join(format!(".tmp.{}.{}", name, std::process::id()));
         if tmp.exists() {
             fs::remove_dir_all(&tmp).map_err(io_err(&tmp))?;
         }
-        fs::create_dir_all(tmp.join("panes")).map_err(io_err(&tmp))?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).map_err(io_err(&tmp))?;
+        create_dir_700(&tmp.join("panes")).map_err(io_err(&tmp))?;
         Ok(tmp)
     }
 
@@ -105,7 +134,9 @@ impl SessionStore {
     pub fn commit(&self, tmp: &Path, name: &str, auto: bool) -> Result<PathBuf, StoreError> {
         let dest = self.dir_for(name, auto);
         if dest.exists() {
-            let graveyard = tmp.with_extension("old");
+            // Include the PID so concurrent commits of the same save name
+            // don't collide on the graveyard dir.
+            let graveyard = dest.with_file_name(format!(".old.{}.{}", name, std::process::id()));
             fs::rename(&dest, &graveyard).map_err(io_err(&dest))?;
             fs::rename(tmp, &dest).map_err(io_err(tmp))?;
             let _ = fs::remove_dir_all(&graveyard);
@@ -126,8 +157,16 @@ impl SessionStore {
             path: path.clone(),
             source,
         })?;
-        fs::write(&path, json).map_err(io_err(&path))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(io_err(&path))?;
+        // Create 0600 up-front so scrollback-bearing manifests are never even
+        // briefly world-readable (was create-then-chmod).
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(io_err(&path))?;
+        f.write_all(&json).map_err(io_err(&path))?;
         Ok(())
     }
 
@@ -135,6 +174,15 @@ impl SessionStore {
         Self::validate_name(name)?;
         let dir = self.dir_for(name, auto);
         let path = dir.join("manifest.json");
+        // Refuse an oversized manifest before allocating it.
+        if let Ok(md) = fs::metadata(&path)
+            && md.len() > MAX_MANIFEST_BYTES
+        {
+            return Err(StoreError::TooLarge {
+                name: name.into(),
+                what: "manifest bytes",
+            });
+        }
         let bytes = fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 StoreError::NotFound(name.into())
@@ -155,6 +203,24 @@ impl SessionStore {
                 name: name.into(),
                 found: manifest.schema_version,
             });
+        }
+        // Bound the fan-out so restore can't be stalled by a hostile save
+        // (also caps the sequential per-pane wait in restore).
+        if manifest.sessions.len() > MAX_SESSIONS {
+            return Err(StoreError::TooLarge {
+                name: name.into(),
+                what: "sessions",
+            });
+        }
+        for s in &manifest.sessions {
+            if s.windows.len() > MAX_WINDOWS
+                || s.windows.iter().any(|w| w.panes.len() > MAX_PANES)
+            {
+                return Err(StoreError::TooLarge {
+                    name: name.into(),
+                    what: "windows/panes",
+                });
+            }
         }
         Ok((manifest, dir))
     }
@@ -202,6 +268,10 @@ impl SessionStore {
     pub fn resolve(&self, name: &str) -> Option<(String, bool)> {
         if name == "latest" {
             let target = fs::read_link(self.root.join("autosave/latest")).ok()?;
+            // The symlink must name a single save directory, never a path.
+            if target.components().count() != 1 {
+                return None;
+            }
             return Some((target.to_string_lossy().into_owned(), true));
         }
         if self.root.join("sessions").join(name).is_dir() {

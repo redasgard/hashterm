@@ -32,7 +32,17 @@ fn parse(args: &[String]) -> Option<TmuxEvent> {
         return None;
     }
     let name = args.get(1)?.as_str();
-    let session = || args.get(2).cloned().unwrap_or_default();
+    // Defense in depth: the tmux hooks now pass #{q:hook_session_name}, but
+    // don't forward a session string that isn't our own ht- shape — it would
+    // only ever be a hostile name planted on the shared server.
+    let session = || {
+        let s = args.get(2).cloned().unwrap_or_default();
+        if s.is_empty() || s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            s
+        } else {
+            String::new()
+        }
+    };
     Some(match name {
         "session-created" => TmuxEvent::SessionCreated { session: session() },
         "session-closed" => TmuxEvent::SessionClosed { session: session() },

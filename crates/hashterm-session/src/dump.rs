@@ -12,7 +12,7 @@ use hashterm_tmux::controller::{
 use hashterm_tmux::{TmuxController, TmuxError};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -304,8 +304,14 @@ fn capture_scrollback(
 
     let rel = format!("panes/{}.scrollback.zst", pane_id.trim_start_matches('%'));
     let out_path = dir.join(&rel);
-    let file = std::fs::File::create(&out_path)?;
-    std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o600))?;
+    // Create 0600 up-front: scrollback may hold secrets, never even briefly
+    // world-readable (was create-then-chmod).
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&out_path)?;
     let mut enc = zstd::Encoder::new(file, 3)?;
 
     let mut lines: u64 = 0;
@@ -336,8 +342,10 @@ fn unquote_title(q: &str) -> String {
     let mut chars = q.chars();
     while let Some(c) = chars.next() {
         if c == '\\' {
-            if let Some(n) = chars.next() {
-                out.push(n);
+            // A trailing lone backslash is literal, not an escape lead-in.
+            match chars.next() {
+                Some(n) => out.push(n),
+                None => out.push('\\'),
             }
         } else {
             out.push(c);

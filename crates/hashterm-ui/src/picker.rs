@@ -63,12 +63,18 @@ pub fn open(win: &Rc<MainWindow>) {
 
     dialog.set_child(Some(&root));
 
+    // Per-row (name, auto), kept in list order — safe replacement for stashing
+    // typed pointers in GObject qdata via unsafe set_data/data.
+    let rows: Rc<std::cell::RefCell<Vec<(String, bool)>>> =
+        Rc::new(std::cell::RefCell::new(Vec::new()));
     let refresh = {
         let list = list.clone();
+        let rows = rows.clone();
         move || {
             while let Some(row) = list.first_child() {
                 list.remove(&row);
             }
+            rows.borrow_mut().clear();
             let store = SessionStore::new(SessionStore::default_root());
             match store.list() {
                 Ok(saves) => {
@@ -85,11 +91,7 @@ pub fn open(win: &Rc<MainWindow>) {
                             .build();
                         let row = gtk4::ListBoxRow::new();
                         row.set_child(Some(&label));
-                        // name + auto flag ride along for the buttons.
-                        unsafe {
-                            row.set_data("save-name", s.name.clone());
-                            row.set_data("save-auto", s.auto);
-                        }
+                        rows.borrow_mut().push((s.name.clone(), s.auto));
                         list.append(&row);
                     }
                 }
@@ -99,14 +101,14 @@ pub fn open(win: &Rc<MainWindow>) {
     };
     refresh();
 
-    fn selected(list: &gtk4::ListBox) -> Option<(String, bool)> {
-        let row = list.selected_row()?;
-        unsafe {
-            let name = row.data::<String>("save-name")?.as_ref().clone();
-            let auto = *row.data::<bool>("save-auto")?.as_ref();
-            Some((name, auto))
-        }
-    }
+    type Selector = Rc<dyn Fn(&gtk4::ListBox) -> Option<(String, bool)>>;
+    let selected: Selector = {
+        let rows = rows.clone();
+        Rc::new(move |list: &gtk4::ListBox| {
+            let idx = list.selected_row()?.index();
+            rows.borrow().get(idx as usize).cloned()
+        })
+    };
 
     save_btn.connect_clicked({
         let win = Rc::downgrade(win);
@@ -129,6 +131,7 @@ pub fn open(win: &Rc<MainWindow>) {
         let win = Rc::downgrade(win);
         let list = list.clone();
         let dialog = dialog.clone();
+        let selected = selected.clone();
         move |_| {
             if let (Some(w), Some((name, _auto))) = (win.upgrade(), selected(&list)) {
                 w.restore_named(&name);
@@ -140,6 +143,7 @@ pub fn open(win: &Rc<MainWindow>) {
     delete_btn.connect_clicked({
         let list = list.clone();
         let refresh = refresh.clone();
+        let selected = selected.clone();
         move |_| {
             if let Some((name, auto)) = selected(&list) {
                 let store = SessionStore::new(SessionStore::default_root());

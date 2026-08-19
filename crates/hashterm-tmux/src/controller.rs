@@ -124,6 +124,9 @@ impl TmuxController {
             args.push(cwd.to_string_lossy().into_owned());
         }
         if let Some(cmd) = &opts.command {
+            // `--` so a command whose first token starts with `-` cannot be
+            // parsed by tmux as a new-session flag.
+            args.push("--".into());
             args.extend(cmd.iter().cloned());
         }
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -132,7 +135,8 @@ impl TmuxController {
             return Err(TmuxError::Parse(id));
         }
         let sid = TmuxSessionId(id);
-        self.run(&["set-option", "-t", &sid.0, TITLE_OPTION, &opts.title])?;
+        let title = sanitize_option_value(&opts.title);
+        self.run(&["set-option", "-t", &sid.0, TITLE_OPTION, &title])?;
         // Group set at creation so the tab never flashes in the wrong group.
         if let Some(group) = opts.group.as_deref() {
             self.set_group(&sid, Some(group))?;
@@ -145,7 +149,8 @@ impl TmuxController {
     }
 
     pub fn set_title(&self, id: &TmuxSessionId, title: &str) -> Result<(), TmuxError> {
-        self.run(&["set-option", "-t", &id.0, TITLE_OPTION, title])
+        let title = sanitize_option_value(title);
+        self.run(&["set-option", "-t", &id.0, TITLE_OPTION, &title])
             .map(|_| ())
     }
 
@@ -182,9 +187,9 @@ impl TmuxController {
         id: &TmuxSessionId,
         color: Option<&str>,
     ) -> Result<(), TmuxError> {
-        match color {
+        match color.and_then(valid_hex_color) {
             Some(c) => self
-                .run(&["set-option", "-t", &id.0, GROUP_COLOR_OPTION, c])
+                .run(&["set-option", "-t", &id.0, GROUP_COLOR_OPTION, &c])
                 .map(|_| ()),
             None => self
                 .run(&["set-option", "-u", "-t", &id.0, GROUP_COLOR_OPTION])
@@ -194,9 +199,9 @@ impl TmuxController {
 
     /// Set or clear the per-tab accent color ("#rrggbb").
     pub fn set_accent(&self, id: &TmuxSessionId, accent: Option<&str>) -> Result<(), TmuxError> {
-        match accent {
+        match accent.and_then(valid_hex_color) {
             Some(color) => self
-                .run(&["set-option", "-t", &id.0, ACCENT_OPTION, color])
+                .run(&["set-option", "-t", &id.0, ACCENT_OPTION, &color])
                 .map(|_| ()),
             None => self
                 .run(&["set-option", "-u", "-t", &id.0, ACCENT_OPTION])
@@ -244,18 +249,25 @@ impl TmuxController {
             else {
                 return Err(TmuxError::Parse(line.into()));
             };
-            let title = parts.next().unwrap_or("").to_owned();
+            // Sanitize the title at the read boundary too: a newline set
+            // directly on the shared server (or restored from a hostile save)
+            // would otherwise spill a second line into `list-sessions -F`
+            // output and break parsing of every session after it.
+            let title = sanitize_option_value(parts.next().unwrap_or(""));
             if !name.starts_with(SESSION_PREFIX) {
                 continue;
             }
+            // Validate at the read boundary: an in-pane process can set these
+            // options directly on the shared server, bypassing our writers.
+            // Colors must be #rrggbb; a group name is sanitized + length-capped.
             sessions.push(SessionInfo {
                 id: TmuxSessionId(id.to_owned()),
                 name: name.to_owned(),
                 title,
                 title_custom: custom == "1",
-                accent: (!accent.is_empty()).then(|| accent.to_owned()),
-                group: (!group.is_empty()).then(|| group.to_owned()),
-                group_color: (!group_color.is_empty()).then(|| group_color.to_owned()),
+                accent: valid_hex_color(accent),
+                group: (!group.is_empty()).then(|| sanitize_group_name(group)),
+                group_color: valid_hex_color(group_color),
                 attached: attached.parse().unwrap_or(0),
             });
         }
@@ -285,7 +297,27 @@ impl TmuxController {
 /// Group names travel in a tab-separated tmux format string: tabs/newlines
 /// are replaced with spaces and the result trimmed.
 pub fn sanitize_group_name(name: &str) -> String {
-    name.replace(['\t', '\n', '\r'], " ").trim().to_owned()
+    name.replace(['\t', '\n', '\r'], " ")
+        .trim()
+        .chars()
+        .take(64)
+        .collect()
+}
+
+/// Strip the delimiter/newline bytes that would corrupt the tab-delimited
+/// `list-sessions -F` wire format, and cap length. Applied to every value we
+/// write into a session user-option (title especially: a newline there would
+/// inject a spurious line into list-sessions output and break parsing).
+pub fn sanitize_option_value(s: &str) -> String {
+    s.replace(['\t', '\n', '\r'], " ").chars().take(256).collect()
+}
+
+/// A `#rrggbb` color or nothing. Validated at BOTH the write boundary and the
+/// read boundary (list_sessions), because a process inside a pane can set the
+/// option directly on the shared tmux server, bypassing our writers.
+pub fn valid_hex_color(s: &str) -> Option<String> {
+    let h = s.strip_prefix('#')?;
+    (h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_owned())
 }
 
 /// Fresh hashterm session name: `ht-` + time-ordered unique id.

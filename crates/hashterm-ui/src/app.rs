@@ -39,11 +39,20 @@ pub fn run(config: Config, gtk_args: Vec<String>, startup_warning: Option<String
         let config = config.clone();
         let window = window.clone();
         move |app, cmdline| {
-            let args: Vec<String> = cmdline
+            let mut args: Vec<String> = cmdline
                 .arguments()
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
+            // SECURITY: a "remote" command line was forwarded over the
+            // session bus by some other process — potentially any peer that
+            // can reach org.gtk.Application.CommandLine (a sandboxed app, a
+            // program running inside a pane). It must NOT be able to make us
+            // run arbitrary programs or open attacker-chosen paths. Locally
+            // typed invocations (is_remote() == false) keep full power.
+            if cmdline.is_remote() {
+                args = sanitize_remote_args(&args);
+            }
             // --toggle owns visibility itself; a first launch with
             // general.start_hidden waits for the hotkey; everything else
             // presents (a second plain `hashterm` invocation always shows).
@@ -101,8 +110,9 @@ fn ensure_window(
     *window.borrow_mut() = Some(win.clone());
 
     // Debug aid: HASHTERM_SHOT=/path.png renders the window content to a PNG
-    // (offscreen GSK render of the widget tree) 3s after startup.
-    if let Some(path) = std::env::var_os("HASHTERM_SHOT") {
+    // (offscreen GSK render of the widget tree) 3s after startup. Debug-only:
+    // in a release binary an attacker-set env must not choose an output path.
+    if let Some(path) = std::env::var_os("HASHTERM_SHOT").filter(|_| cfg!(debug_assertions)) {
         let w = Rc::downgrade(&win);
         let path = std::path::PathBuf::from(path);
         glib::timeout_add_seconds_local(3, move || {
@@ -114,7 +124,7 @@ fn ensure_window(
     }
 
     // Debug aid: HASHTERM_GEOMETRY=1 logs the allocation chain periodically.
-    if std::env::var_os("HASHTERM_GEOMETRY").is_some() {
+    if cfg!(debug_assertions) && std::env::var_os("HASHTERM_GEOMETRY").is_some() {
         let w = Rc::downgrade(&win);
         glib::timeout_add_seconds_local(2, move || match w.upgrade() {
             Some(w) => {
@@ -140,22 +150,33 @@ fn sync_autostart(enabled: bool) {
     let dir = glib::user_config_dir().join("autostart");
     let path = dir.join("com.redasgard.Hashterm.desktop");
     if enabled {
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "hashterm".into());
-        let entry = format!(
-            "[Desktop Entry]\n\
+        // Hard-coded `Exec=hashterm` (resolved via PATH): never interpolate
+        // current_exe(), whose path needs XDG quoting and could carry a
+        // newline that injects extra desktop-entry keys.
+        let entry = "[Desktop Entry]\n\
              Type=Application\n\
              Name=hashterm\n\
              Comment=tmux-native drop-down terminal\n\
-             Exec={exe}\n\
+             Exec=hashterm\n\
              Terminal=false\n\
-             X-GNOME-Autostart-enabled=true\n"
-        );
-        let up_to_date = std::fs::read_to_string(&path).ok().as_deref() == Some(entry.as_str());
+             X-GNOME-Autostart-enabled=true\n";
+        let up_to_date = std::fs::read_to_string(&path).ok().as_deref() == Some(entry);
         if !up_to_date {
-            if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, entry))
-            {
+            let write = || -> std::io::Result<()> {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::create_dir_all(&dir)?;
+                // O_NOFOLLOW: refuse to write through a symlink planted at the
+                // autostart path.
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&path)?;
+                f.write_all(entry.as_bytes())
+            };
+            if let Err(e) = write() {
                 tracing::error!("cannot write autostart entry {}: {e}", path.display());
             } else {
                 tracing::info!("autostart enabled: {}", path.display());
@@ -200,8 +221,42 @@ fn wire_global_hotkey(
     }
 }
 
+/// Drop the command-executing / path-taking verbs from a bus-forwarded
+/// command line, keeping only the safe presence verbs. A remote peer may ask
+/// us to show ourselves or open an empty tab; it may not choose the program,
+/// the working directory, or a session to restore.
+fn sanitize_remote_args(args: &[String]) -> Vec<String> {
+    // Whitelist: from a remote peer, only the value-less presence verbs are
+    // honored. `-e/--exec` (+ its trailing argv), `--cwd`, `--restore`,
+    // `--config` and their values are dropped regardless of position.
+    let mut out = Vec::with_capacity(args.len());
+    if let Some(a0) = args.first() {
+        out.push(a0.clone()); // argv[0]: GApplicationCommandLine includes it
+    }
+    let mut it = args.iter().skip(1);
+    let mut dropped = false;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--toggle" | "--new-tab" => out.push(a.clone()),
+            "-e" | "--exec" => {
+                dropped = true;
+                break; // consumes all following args
+            }
+            "--cwd" | "--restore" | "--config" => {
+                dropped = true;
+                let _ = it.next(); // discard the value too
+            }
+            _ => dropped = true, // unknown / bare command word: drop
+        }
+    }
+    if dropped {
+        tracing::warn!("ignored command-executing flags from a remote (D-Bus) invocation");
+    }
+    out
+}
+
 /// Minimal parse of action flags forwarded from a secondary invocation.
-/// clap already validated them in that process; here we only dispatch.
+/// Remote invocations are pre-filtered by `sanitize_remote_args`.
 fn dispatch_flags(win: &Rc<MainWindow>, args: &[String]) {
     let mut it = args.iter().skip(1).peekable();
     let mut new_tab = false;
@@ -527,4 +582,36 @@ fn wire_autosave(config: &Rc<RefCell<Config>>, win: &Rc<MainWindow>) {
         });
         glib::ControlFlow::Continue
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_remote_args;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn remote_args_drop_exec_and_value_verbs() {
+        // -e and everything after it is dropped.
+        assert_eq!(
+            sanitize_remote_args(&v(&["hashterm", "--new-tab", "-e", "sh", "-c", "evil"])),
+            v(&["hashterm", "--new-tab"])
+        );
+        // --cwd / --restore / --config and their values are dropped anywhere.
+        assert_eq!(
+            sanitize_remote_args(&v(&["hashterm", "--cwd", "/root", "--toggle"])),
+            v(&["hashterm", "--toggle"])
+        );
+        assert_eq!(
+            sanitize_remote_args(&v(&["hashterm", "--restore", "x"])),
+            v(&["hashterm"])
+        );
+        // Bare presence verbs survive.
+        assert_eq!(
+            sanitize_remote_args(&v(&["hashterm", "--toggle"])),
+            v(&["hashterm", "--toggle"])
+        );
+    }
 }

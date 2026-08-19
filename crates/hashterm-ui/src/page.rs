@@ -46,7 +46,15 @@ impl TerminalPage {
                 if let Some(cb) = on_title.borrow().as_ref()
                     && let (Some(title), _) = t.termprop_string(prop)
                 {
-                    cb(title.to_string());
+                    // A pane's output is untrusted: strip control chars and cap
+                    // length before this reaches GTK. A multi-MB title otherwise
+                    // blocks the main thread in Pango layout (DoS).
+                    let clean: String = title
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(256)
+                        .collect();
+                    cb(clean);
                 }
             });
         }
@@ -61,8 +69,15 @@ impl TerminalPage {
 
         let argv: Vec<&str> = attach_argv.iter().map(String::as_str).collect();
         // vte4's envv is not optional and an empty slice means an EMPTY
-        // environment, not inherit — pass the full parent environment.
-        let env: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+        // environment, not inherit — pass the parent environment, minus a
+        // denylist of dynamic-linker / interpreter-hijack variables so a value
+        // hashterm was launched with can't be inherited by every shell in
+        // every tab. GDK_BACKEND (which we may force to x11) is also dropped so
+        // it doesn't steer child GTK apps.
+        let env: Vec<String> = std::env::vars()
+            .filter(|(k, _)| !env_is_denied(k))
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
         let envv: Vec<&str> = env.iter().map(String::as_str).collect();
         term.spawn_async(
             vte4::PtyFlags::DEFAULT,
@@ -120,8 +135,105 @@ impl TerminalPage {
     }
 
     pub fn paste_clipboard(&self) {
-        self.term.paste_clipboard();
+        // Guard against paste-injection: clipboard content with a newline
+        // executes as soon as it lands. Inspect the text first; if it carries
+        // a newline (or other control byte), confirm before pasting. The paste
+        // itself always goes through VTE's paste_clipboard(), which preserves
+        // bracketed-paste framing (the standard defense) — never a raw
+        // feed_child, which would strip it and be MORE dangerous.
+        let term = self.term.clone();
+        let clipboard = term.clipboard();
+        clipboard.read_text_async(gtk4::gio::Cancellable::NONE, move |res| {
+            let Ok(Some(text)) = res else {
+                // Couldn't inspect (e.g. non-text clipboard): fall back to the
+                // normal, bracketed paste.
+                term.paste_clipboard();
+                return;
+            };
+            let risky = text
+                .chars()
+                .any(|c| c == '\n' || (c.is_control() && c != '\t'));
+            if !risky {
+                term.paste_clipboard();
+                return;
+            }
+            confirm_multiline_paste(&term, text.lines().count());
+        });
     }
+}
+
+/// Environment variables never forwarded to child shells: dynamic-linker and
+/// interpreter hijack vectors, plus the backend override we may have forced.
+fn env_is_denied(key: &str) -> bool {
+    matches!(
+        key,
+        "LD_PRELOAD"
+            | "LD_LIBRARY_PATH"
+            | "LD_AUDIT"
+            | "GTK_MODULES"
+            | "GIO_MODULE_DIR"
+            | "BASH_ENV"
+            | "ENV"
+            | "PYTHONSTARTUP"
+            | "NODE_OPTIONS"
+            | "PERL5OPT"
+            | "GDK_BACKEND"
+    )
+}
+
+/// Modal "this paste has newlines — run it?" confirmation. On confirm the
+/// clipboard is pasted normally (bracketed-paste preserved); on cancel nothing
+/// happens.
+fn confirm_multiline_paste(term: &vte4::Terminal, lines: usize) {
+    let root = term.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+    let dialog = gtk4::Window::builder()
+        .modal(true)
+        .title("Confirm paste")
+        .default_width(420)
+        .build();
+    if let Some(w) = &root {
+        dialog.set_transient_for(Some(w));
+    }
+    let root_box = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    root_box.set_margin_top(14);
+    root_box.set_margin_bottom(14);
+    root_box.set_margin_start(14);
+    root_box.set_margin_end(14);
+    let lines = lines.max(1);
+    root_box.append(
+        &gtk4::Label::builder()
+            .label(format!(
+                "The clipboard contains {lines} line(s) and may run commands as soon as it is pasted. Paste anyway?"
+            ))
+            .wrap(true)
+            .xalign(0.0)
+            .build(),
+    );
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    let cancel = gtk4::Button::with_label("Cancel");
+    let paste = gtk4::Button::with_label("Paste");
+    paste.add_css_class("destructive-action");
+    buttons.append(&spacer);
+    buttons.append(&cancel);
+    buttons.append(&paste);
+    root_box.append(&buttons);
+    dialog.set_child(Some(&root_box));
+    cancel.connect_clicked({
+        let dialog = dialog.clone();
+        move |_| dialog.close()
+    });
+    paste.connect_clicked({
+        let dialog = dialog.clone();
+        let term = term.clone();
+        move |_| {
+            // Bracketed-paste preserved: re-read the clipboard through VTE.
+            term.paste_clipboard();
+            dialog.close();
+        }
+    });
+    dialog.present();
 }
 
 /// Foreground opaque; background carries the configured opacity so text stays

@@ -1,12 +1,14 @@
-# Build the hashterm .deb and publish SLSA level 3 provenance for it.
+# Build the hashterm .deb and publish SLSA provenance for it.
 #
 # Runs on every published release (and by hand via workflow_dispatch). The
 # build happens in a debian:sid container because hashterm needs GTK >= 4.18
 # and VTE >= 0.84, newer than any ubuntu-latest runner image ships.
 #
-# Provenance comes from the OpenSSF slsa-github-generator reusable workflow,
-# which MUST be referenced by tag (not SHA) — its own verification depends on
-# it. Verify downloads with:
+# Reproducibility follow-up (tracked): pin `container` by @sha256 digest and
+# the `actions/*` steps by commit SHA so the provenance covers fixed inputs;
+# the toolchain is already pinned via rust-toolchain.toml. The
+# slsa-github-generator reusable workflow MUST stay pinned by tag (its own
+# verification depends on it). Verify downloads with:
 #   slsa-verifier verify-artifact hashterm_*.deb \
 #     --provenance-path *.intoto.jsonl \
 #     --source-uri github.com/redasgard/hashterm
@@ -24,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:sid
     permissions:
-      contents: write # attach the .deb to the release
+      contents: read
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
     steps:
@@ -36,13 +38,19 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential curl ca-certificates pkg-config git \
             libgtk-4-dev libvte-2.91-gtk4-dev libgtk4-layer-shell-dev \
-            fakeroot dpkg-dev gzip gh
+            fakeroot dpkg-dev gzip
 
       - name: Install Rust
+        # rust-toolchain.toml pins the exact channel; installer bootstraps it.
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
+          curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.sh https://sh.rustup.rs
+          sh rustup-init.sh -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Supply-chain audit
+        run: |
+          cargo install --locked cargo-deny || true
+          cargo deny check advisories bans sources || echo "::warning::cargo-deny reported findings"
 
       - name: Build .deb
         run: |
@@ -56,16 +64,27 @@ jobs:
           cd dist
           echo "hashes=$(sha256sum hashterm_*.deb | base64 -w0)" >> "$GITHUB_OUTPUT"
 
-      - name: Attach .deb to the release
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/hashterm_*.deb --clobber
-
       - uses: actions/upload-artifact@v4
         with:
           name: hashterm-deb
           path: dist/hashterm_*.deb
+
+  # Separate job so contents:write (release upload) is scoped to just this
+  # step, not held for the whole build (where a build.rs could abuse it).
+  upload:
+    needs: [build]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hashterm-deb
+      - name: Attach .deb to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" hashterm_*.deb --clobber
 
   provenance:
     needs: [build]

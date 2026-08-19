@@ -18,7 +18,7 @@ impl X11Overlay {
     fn xid(win: &gtk4::ApplicationWindow) -> Option<u32> {
         let surface = win.surface()?;
         let x11 = surface.downcast_ref::<gdk4_x11::X11Surface>()?;
-        Some(x11.xid() as u32)
+        u32::try_from(x11.xid()).ok()
     }
 
     fn apply_ewmh(

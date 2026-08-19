@@ -941,6 +941,7 @@ dependencies = [
 name = "hashterm-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "thiserror",
@@ -995,6 +996,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "hashterm-core",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

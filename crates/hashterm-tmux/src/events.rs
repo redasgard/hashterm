@@ -4,10 +4,16 @@
 //! awaits inside glib::spawn_future_local. GTK-free.
 
 use hashterm_core::ipc::TmuxEvent;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+
+/// The largest TmuxEvent JSON line is well under this; anything longer is
+/// hostile (slow-loris / memory exhaustion) and the connection is dropped.
+const MAX_LINE: u64 = 4096;
+/// Events buffered before back-pressure applies to senders (hooks).
+const CHANNEL_CAP: usize = 256;
 
 pub struct TmuxEventBus {
     pub receiver: async_channel::Receiver<TmuxEvent>,
@@ -25,7 +31,7 @@ impl TmuxEventBus {
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
 
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(CHANNEL_CAP);
         std::thread::Builder::new()
             .name("hashterm-ipc".into())
             .spawn(move || accept_loop(listener, tx))?;
@@ -43,22 +49,64 @@ impl Drop for TmuxEventBus {
 }
 
 fn accept_loop(listener: UnixListener, tx: async_channel::Sender<TmuxEvent>) {
+    let self_uid = current_uid();
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        // hashterm-ctl sends one line and exits; handle inline, no per-conn thread.
-        let reader = BufReader::new(stream);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            match serde_json::from_str::<TmuxEvent>(&line) {
-                Ok(event) => {
-                    if tx.send_blocking(event).is_err() {
-                        return; // GUI gone: stop listening
-                    }
-                }
-                Err(e) => tracing::warn!("ignoring malformed ipc line: {e}"),
-            }
+        // Only accept peers with our own UID (defense in depth beyond the
+        // 0700 dir): a co-UID caller is the trust boundary we accept.
+        if let (Some(peer), Some(me)) = (peer_uid(&stream), self_uid)
+            && peer != me
+        {
+            tracing::warn!("rejecting ipc connection from uid {peer}");
+            continue;
         }
+        // hashterm-ctl sends one short line and exits; a per-connection
+        // thread means a slow/hostile sender can't stall the accept loop.
+        let tx = tx.clone();
+        std::thread::spawn(move || handle_conn(stream, &tx));
     }
+}
+
+fn handle_conn(stream: UnixStream, tx: &async_channel::Sender<TmuxEvent>) {
+    // Cap the read so an endless line can't exhaust memory; one line is enough.
+    let mut reader = BufReader::new(stream.take(MAX_LINE));
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => {}
+        Ok(_) => match serde_json::from_str::<TmuxEvent>(line.trim_end()) {
+            Ok(event) => {
+                let _ = tx.send_blocking(event);
+            }
+            Err(e) => tracing::warn!("ignoring malformed ipc line: {e}"),
+        },
+        Err(e) => tracing::warn!("ipc read error (line too long?): {e}"),
+    }
+}
+
+fn current_uid() -> Option<u32> {
+    // SAFETY: getuid() takes no arguments and cannot fail.
+    Some(unsafe { libc::getuid() })
+}
+
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: valid fd, correctly-sized ucred out-param and matching len.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(cred.uid)
 }
 
 #[cfg(test)]
@@ -74,25 +122,27 @@ mod tests {
             .join("ipc.sock");
         let bus = TmuxEventBus::start(&path).unwrap();
 
-        let mut c1 = UnixStream::connect(&path).unwrap();
-        c1.write_all(b"{\"event\":\"bell\",\"session\":\"ht-1\"}\n")
-            .unwrap();
-        drop(c1);
-        let mut c2 = UnixStream::connect(&path).unwrap();
-        c2.write_all(b"not json\n{\"event\":\"new-tab\"}\n")
-            .unwrap();
-        drop(c2);
+        // One line per connection (the real hashterm-ctl protocol).
+        let send = |line: &[u8]| {
+            let mut c = UnixStream::connect(&path).unwrap();
+            c.write_all(line).unwrap();
+        };
+        send(b"{\"event\":\"bell\",\"session\":\"ht-1\"}\n");
+        send(b"not json\n"); // malformed: dropped
+        send(b"{\"event\":\"new-tab\"}\n");
 
-        let ev1 = bus.receiver.recv_blocking().unwrap();
-        assert_eq!(
-            ev1,
+        // Per-connection threads mean arrival order isn't guaranteed; assert
+        // the set of the two valid events.
+        let mut got = std::collections::HashSet::new();
+        got.insert(format!("{:?}", bus.receiver.recv_blocking().unwrap()));
+        got.insert(format!("{:?}", bus.receiver.recv_blocking().unwrap()));
+        assert!(got.contains(&format!(
+            "{:?}",
             TmuxEvent::Bell {
                 session: "ht-1".into()
             }
-        );
-        // Malformed line skipped, valid one after it still delivered.
-        let ev2 = bus.receiver.recv_blocking().unwrap();
-        assert_eq!(ev2, TmuxEvent::NewTab);
+        )));
+        assert!(got.contains(&format!("{:?}", TmuxEvent::NewTab)));
 
         let sock = bus.path.clone();
         drop(bus);

@@ -38,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-channel = "2"
 zstd = "0.13"
 futures-util = "0.3"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

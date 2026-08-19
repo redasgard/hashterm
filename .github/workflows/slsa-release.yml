@@ -1,0 +1,79 @@
+# Build the hashterm .deb and publish SLSA level 3 provenance for it.
+#
+# Runs on every published release (and by hand via workflow_dispatch). The
+# build happens in a debian:sid container because hashterm needs GTK >= 4.18
+# and VTE >= 0.84, newer than any ubuntu-latest runner image ships.
+#
+# Provenance comes from the OpenSSF slsa-github-generator reusable workflow,
+# which MUST be referenced by tag (not SHA) — its own verification depends on
+# it. Verify downloads with:
+#   slsa-verifier verify-artifact hashterm_*.deb \
+#     --provenance-path *.intoto.jsonl \
+#     --source-uri github.com/redasgard/hashterm
+
+name: release
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions: read-all
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:sid
+    permissions:
+      contents: write # attach the .deb to the release
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates pkg-config \
+            libgtk-4-dev libvte-2.91-gtk4-dev libgtk4-layer-shell-dev \
+            fakeroot dpkg-dev gzip gh
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build .deb
+        run: |
+          cargo build --release --locked
+          ./packaging/build-deb.sh
+
+      - name: Generate provenance subjects
+        id: hash
+        run: |
+          set -euo pipefail
+          cd dist
+          echo "hashes=$(sha256sum hashterm_*.deb | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - name: Attach .deb to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/hashterm_*.deb --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hashterm-deb
+          path: dist/hashterm_*.deb
+
+  provenance:
+    needs: [build]
+    permissions:
+      actions: read   # read the workflow path
+      id-token: write # sign the provenance
+      contents: write # attach provenance to the release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: ${{ github.event_name == 'release' }}

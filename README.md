@@ -8,6 +8,8 @@ attaches. Kill the window, crash it, `kill -9` it: your shells, scrollback and
 running programs keep going, and the next launch re-adopts them exactly where
 they were.
 
+![hashterm — frameless quake console with per-tab accent rings](docs/screenshots/hero.png)
+
 ## Features
 
 - **Quake-style drop-down** — a global hotkey (default `F12`) slides the
@@ -35,6 +37,21 @@ they were.
   auto-hiding tab bar on any edge, separate terminal/tab-bar/window opacity,
   `Ctrl+Alt+Shift`+scroll live window transparency (remembered across
   restarts), clipboard bridged into tmux copy-mode.
+
+### The tab matrix
+
+Groups run along one edge, the active group's terminals along the perpendicular
+one. Each group has a color, drawn as a ring around the terminal; drop a tab on
+a group to move it, or on `+` for a new one.
+
+![The tab matrix — group bar on the left, terminals on top, colored group ring](docs/screenshots/matrix.png)
+
+### The switch dial
+
+Switching tabs shows a wheel: the current tab bright in the center, neighbors
+receding above and below.
+
+![Tab-switch dial OSD](docs/screenshots/dial.png)
 
 ## Install
 

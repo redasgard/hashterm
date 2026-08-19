@@ -48,8 +48,16 @@ pub fn take_unclean_and_arm() -> bool {
     if let Some(dir) = lock.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&lock, b"running");
+    // Store our PID so `hashterm --restart` can find the running instance.
+    let _ = std::fs::write(&lock, std::process::id().to_string());
     was_unclean
+}
+
+/// PID of the running GUI instance, if the lock is present and parses.
+pub fn running_pid() -> Option<u32> {
+    std::fs::read_to_string(lock_path())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
 }
 
 /// Mark a clean shutdown so the next start does not offer to restore.

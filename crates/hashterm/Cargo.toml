@@ -11,6 +11,7 @@ name = "hashterm"
 path = "src/main.rs"
 
 [dependencies]
+libc.workspace = true
 hashterm-core = { workspace = true }
 hashterm-session = { workspace = true }
 hashterm-tmux = { workspace = true }

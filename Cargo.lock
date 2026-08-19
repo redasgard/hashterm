@@ -934,6 +934,7 @@ dependencies = [
  "hashterm-session",
  "hashterm-tmux",
  "hashterm-ui",
+ "libc",
  "tracing",
 ]
 

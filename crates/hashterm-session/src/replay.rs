@@ -52,7 +52,11 @@ pub fn run_restore_pane(
     if let Some(path) = scrollback {
         match std::fs::File::open(path) {
             Ok(file) => match zstd::Decoder::new(file) {
-                Ok(mut dec) => {
+                Ok(dec) => {
+                    // Bound the decompressed stream: a tiny zstd file can
+                    // expand to gigabytes (decompression bomb).
+                    const MAX_REPLAY_BYTES: u64 = 32 * 1024 * 1024;
+                    let mut dec = std::io::Read::take(dec, MAX_REPLAY_BYTES);
                     if let Err(e) = std::io::copy(&mut dec, &mut out) {
                         let _ = writeln!(out, "hashterm: scrollback replay failed: {e}");
                     }

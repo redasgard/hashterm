@@ -10,8 +10,11 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpManifest {
     pub schema_version: u32,
-    /// RFC3339.
+    /// RFC3339 UTC (sort key / machine-readable).
     pub created_at: String,
+    /// Local-time display string ("YYYY-MM-DD HH:MM"); empty on old saves.
+    #[serde(default)]
+    pub created_local: String,
     pub tmux_version: String,
     /// Largest attached client at dump time, for `new-session -x/-y`.
     pub client_size: (u16, u16),
@@ -91,6 +94,7 @@ mod tests {
         let m = DumpManifest {
             schema_version: SCHEMA_VERSION,
             created_at: "2026-08-14T00:00:00Z".into(),
+            created_local: "2026-08-14 00:00".into(),
             tmux_version: "3.5a".into(),
             client_size: (220, 50),
             sessions: vec![SessionDump {

@@ -142,8 +142,12 @@ prev_group = "<Ctrl>Page_Up"
 # Autosaves rotate; named saves via the Ctrl+Shift+S picker never expire.
 autosave_interval_secs = 300
 autosave_keep = 12
-# Restore the newest autosave at startup when the server has no sessions.
+# Silently restore the newest autosave at startup when the server is empty.
 restore_on_start = false
+# Browser-style: if the previous run ended UNCLEANLY (crash, kill, reboot) and
+# a recent save exists, ask at startup whether to restore it. Takes precedence
+# over restore_on_start's silent behavior.
+prompt_on_start = true
 
 [restore]
 # Programs restarted automatically on restore (matched by basename).
@@ -162,6 +166,14 @@ pretype_unrestored = true
 exclude_panes = []
 # Cap captured scrollback lines per pane; 0 = everything.
 max_scrollback_lines = 0
+
+# Resume recipes: on restore, run a different command than the one captured,
+# so a program that saves its own state resumes it instead of starting fresh.
+# The key is the program's basename; the value is the argv to run in its cwd.
+# TRUSTED (this is your config): a recipe may run a program from anywhere on
+# your PATH, unlike a command captured from a save file.
+[restore.resume]
+claude = ["claude", "--continue"]
 
 [tmux]
 # true = stock tmux window keybindings inside a tab (re-enables the tmux

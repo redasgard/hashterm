@@ -9,6 +9,16 @@ use hashterm_tmux::controller::NewSessionOpts;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use std::sync::atomic::AtomicBool;
+
+/// Set by the SIGTERM/SIGHUP handler; polled on the glib main loop to trigger a
+/// final snapshot before exit. Only an atomic store happens in signal context.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_shutdown_signal(_sig: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 use crate::csd;
 use crate::groupbar::{GroupBar, GroupBarEvent};
 use crate::page::TerminalPage;
@@ -309,6 +319,7 @@ impl MainWindow {
         this.wire_autohide();
         this.wire_focus_loss();
         this.wire_quit_autosave();
+        this.wire_signal_snapshot();
         this.refresh_toggle_shortcut();
         this.adopt_or_create();
 
@@ -420,36 +431,80 @@ impl MainWindow {
     /// Synchronous autosave on window close: dumps are fast (tens of ms) and
     /// this is the last chance before the process exits. Sessions themselves
     /// keep living on the tmux server regardless.
+    /// Synchronous full snapshot of the server into a rotated autosave. Called
+    /// on window close AND on SIGTERM/SIGHUP (graceful reboot/logout) so a
+    /// restart loses at most the work since this returns, not up to a whole
+    /// autosave interval.
+    pub fn snapshot_now(&self) {
+        let cfg = self.config.borrow();
+        if cfg.session.autosave_interval_secs == 0 {
+            return;
+        }
+        let store =
+            hashterm_session::SessionStore::new(hashterm_session::SessionStore::default_root());
+        let opts = hashterm_session::DumpOptions {
+            exclude_panes: cfg.restore.exclude_panes.clone(),
+            max_scrollback_lines: cfg.restore.max_scrollback_lines,
+        };
+        let stamp = hashterm_session::dump::now_stamp();
+        match hashterm_session::dump_server(&self.ctl, &store, &stamp, true, &opts) {
+            Ok(_) => {
+                let _ = store.prune_autosaves(cfg.session.autosave_keep as usize);
+            }
+            Err(hashterm_session::dump::DumpError::Empty) => {}
+            Err(e) => tracing::warn!("snapshot failed: {e}"),
+        }
+    }
+
     fn wire_quit_autosave(self: &Rc<Self>) {
-        let ctl = (*self.ctl).clone();
-        let config = self.config.clone();
+        let this = Rc::downgrade(self);
         self.window.connect_close_request(move |w| {
-            // Remember the height for next start.
-            let h = w.height();
-            if h > 0 {
-                let mut st = hashterm_core::state::UiState::load();
-                st.window_height_px = Some(h);
-                st.save();
-            }
-            let cfg = config.borrow();
-            if cfg.session.autosave_interval_secs > 0 {
-                let store = hashterm_session::SessionStore::new(
-                    hashterm_session::SessionStore::default_root(),
-                );
-                let opts = hashterm_session::DumpOptions {
-                    exclude_panes: cfg.restore.exclude_panes.clone(),
-                    max_scrollback_lines: cfg.restore.max_scrollback_lines,
-                };
-                let stamp = hashterm_session::dump::now_stamp();
-                match hashterm_session::dump_server(&ctl, &store, &stamp, true, &opts) {
-                    Ok(_) => {
-                        let _ = store.prune_autosaves(cfg.session.autosave_keep as usize);
-                    }
-                    Err(hashterm_session::dump::DumpError::Empty) => {}
-                    Err(e) => tracing::warn!("quit autosave failed: {e}"),
+            if let Some(win) = this.upgrade() {
+                // Remember the height for next start.
+                let h = w.height();
+                if h > 0 {
+                    let mut st = hashterm_core::state::UiState::load();
+                    st.window_height_px = Some(h);
+                    st.save();
                 }
+                win.snapshot_now();
             }
+            // Clean exit: clear the crash marker so next start doesn't offer
+            // to restore.
+            hashterm_core::state::clear_session_lock();
             gtk4::glib::Propagation::Proceed
+        });
+    }
+
+    /// Snapshot then quit on SIGTERM/SIGHUP — a graceful reboot/logout SIGTERMs
+    /// us, and without this the periodic autosave is the only (stale) safety
+    /// net. The signal handler itself only sets an atomic (async-signal-safe);
+    /// a glib timeout does the actual dump on the main loop.
+    fn wire_signal_snapshot(self: &Rc<Self>) {
+        // SAFETY: installing a signal handler that only does an atomic store.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = handle_shutdown_signal as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        }
+        let this = Rc::downgrade(self);
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            if SHUTDOWN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                if let Some(win) = this.upgrade() {
+                    tracing::info!("shutdown signal: snapshotting before exit");
+                    win.persist_height();
+                    win.snapshot_now();
+                    // Deliberately DO NOT clear the unclean marker: a reboot or
+                    // logout is not a user quit, so the next start should offer
+                    // to restore. Exit directly rather than via the window's
+                    // close_request (which clears the marker).
+                }
+                std::process::exit(0);
+            }
+            gtk4::glib::ControlFlow::Continue
         });
     }
 
@@ -1100,6 +1155,7 @@ impl MainWindow {
                 pretype_unrestored: cfg.restore.pretype_unrestored,
                 shell: cfg.general.shell.clone(),
                 helper: std::env::current_exe().unwrap_or_else(|_| "hashterm".into()),
+                resume: cfg.restore.resume.clone(),
             };
             match hashterm_session::restore_save(&ctl, &store, &concrete, auto, &opts) {
                 Ok(report) => {
@@ -1864,15 +1920,22 @@ impl MainWindow {
             tracing::error!("cannot start dedicated tmux server: {e}");
         }
         self.sync_from_server();
+        // Detect whether the previous run ended uncleanly (crash/kill/reboot)
+        // and arm the lock for this run — must happen once at startup.
+        let unclean = hashterm_core::state::take_unclean_and_arm();
         if self.tabs.borrow().is_empty() {
-            let restore_latest = self.config.borrow().session.restore_on_start
-                && hashterm_session::SessionStore::new(
-                    hashterm_session::SessionStore::default_root(),
-                )
-                .resolve("latest")
-                .is_some();
-            if restore_latest {
+            let store = hashterm_session::SessionStore::new(
+                hashterm_session::SessionStore::default_root(),
+            );
+            let has_save = store.resolve("latest").is_some();
+            let cfg = self.config.borrow().session.clone();
+            if cfg.restore_on_start && has_save {
+                // Silent auto-restore (opt-in).
                 self.restore_named("latest");
+            } else if cfg.prompt_on_start && unclean && has_save {
+                // Browser-style: a fresh scratch tab now, then ask.
+                self.new_tab();
+                self.prompt_restore_previous(&store);
             } else {
                 self.new_tab();
             }
@@ -1899,6 +1962,71 @@ impl MainWindow {
         if let Some(s) = target {
             self.select_tab(&s);
         }
+    }
+
+    /// Browser-style "restore previous session?" dialog, shown at startup
+    /// after an unclean exit. On Restore, the newest save is restored
+    /// alongside the fresh scratch tab; on Start fresh, nothing happens.
+    fn prompt_restore_previous(self: &Rc<Self>, store: &hashterm_session::SessionStore) {
+        let (count, when) = match store.resolve("latest").and_then(|(n, a)| store.load(&n, a).ok()) {
+            Some((m, _)) => (
+                m.sessions.len(),
+                if m.created_local.is_empty() {
+                    m.created_at
+                } else {
+                    m.created_local
+                },
+            ),
+            None => return,
+        };
+        let dialog = gtk4::Window::builder()
+            .transient_for(&self.window)
+            .modal(true)
+            .title("Restore previous session")
+            .default_width(420)
+            .build();
+        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+        root.set_margin_top(16);
+        root.set_margin_bottom(16);
+        root.set_margin_start(16);
+        root.set_margin_end(16);
+        root.append(
+            &gtk4::Label::builder()
+                .label(format!(
+                    "Your previous session ended unexpectedly.\n\nRestore {count} terminal(s) from {when}?"
+                ))
+                .wrap(true)
+                .xalign(0.0)
+                .build(),
+        );
+        let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        let fresh = gtk4::Button::with_label("Start fresh");
+        let restore = gtk4::Button::with_label("Restore");
+        restore.add_css_class("suggested-action");
+        buttons.append(&spacer);
+        buttons.append(&fresh);
+        buttons.append(&restore);
+        root.append(&buttons);
+        dialog.set_child(Some(&root));
+        dialog.set_default_widget(Some(&restore));
+
+        fresh.connect_clicked({
+            let dialog = dialog.clone();
+            move |_| dialog.close()
+        });
+        restore.connect_clicked({
+            let this = Rc::downgrade(self);
+            let dialog = dialog.clone();
+            move |_| {
+                if let Some(win) = this.upgrade() {
+                    win.restore_named("latest");
+                }
+                dialog.close();
+            }
+        });
+        dialog.present();
     }
 
     fn refresh_tabbar(self: &Rc<Self>) {

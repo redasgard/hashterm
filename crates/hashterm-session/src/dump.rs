@@ -225,6 +225,7 @@ fn build_manifest(
     Ok(DumpManifest {
         schema_version: SCHEMA_VERSION,
         created_at: now_rfc3339(),
+        created_local: now_local_display(),
         tmux_version,
         client_size,
         sessions: order
@@ -380,6 +381,30 @@ pub fn now_rfc3339() -> String {
 /// Autosave directory name: filesystem-safe sortable timestamp.
 pub fn now_stamp() -> String {
     now_rfc3339().replace(':', "-")
+}
+
+/// Human-friendly LOCAL time ("YYYY-MM-DD HH:MM") for display. Stored at dump
+/// time (the dumping process is in the user's timezone) so the picker/prompt
+/// never has to show UTC.
+pub fn now_local_display() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: valid time_t in, valid tm out; localtime_r is thread-safe.
+    let ok = unsafe { !libc::localtime_r(&secs, &mut tm).is_null() };
+    if !ok {
+        return epoch_to_rfc3339(secs as u64);
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+    )
 }
 
 fn epoch_to_rfc3339(secs: u64) -> String {

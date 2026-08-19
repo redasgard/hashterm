@@ -71,6 +71,10 @@ enum Cmd {
         shell: Option<String>,
         #[arg(long, num_args = 1.., allow_hyphen_values = true)]
         exec: Vec<String>,
+        /// Like --exec but trusted (from user config, not a save file): runs
+        /// without the exec-dir allow-list. Mutually exclusive with --exec.
+        #[arg(long, num_args = 1.., allow_hyphen_values = true, conflicts_with = "exec")]
+        exec_trusted: Vec<String>,
     },
 }
 
@@ -82,12 +86,19 @@ fn main() -> std::process::ExitCode {
         scrollback,
         shell,
         exec,
+        exec_trusted,
     }) = &cli.cmd
     {
+        let (exec_argv, trusted) = if !exec_trusted.is_empty() {
+            (exec_trusted.as_slice(), true)
+        } else {
+            (exec.as_slice(), false)
+        };
         let err = hashterm_session::replay::run_restore_pane(
             scrollback.as_deref(),
             shell.as_deref(),
-            Some(exec.as_slice()),
+            Some(exec_argv),
+            trusted,
         );
         eprintln!("hashterm restore-pane: {err}");
         return std::process::ExitCode::FAILURE;
@@ -258,6 +269,7 @@ fn run_restore(
         pretype_unrestored: config.restore.pretype_unrestored,
         shell: config.general.shell.clone(),
         helper,
+        resume: config.restore.resume.clone(),
     };
     match hashterm_session::restore_save(&ctl, &store, &name, auto, &opts) {
         Ok(report) => {

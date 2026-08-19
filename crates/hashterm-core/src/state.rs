@@ -21,13 +21,40 @@ pub struct UiState {
     pub window_opacity: Option<f64>,
 }
 
-fn path() -> PathBuf {
+fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
         })
-        .join("hashterm/state.json")
+        .join("hashterm")
+}
+
+fn path() -> PathBuf {
+    data_dir().join("state.json")
+}
+
+fn lock_path() -> PathBuf {
+    data_dir().join("running.lock")
+}
+
+/// Browser-style unclean-exit detection. Returns true if the previous run did
+/// NOT exit cleanly (the lock from that run is still present), then arms the
+/// lock for this run. A clean exit calls `clear_session_lock`; a crash / kill
+/// / reboot leaves the lock behind, so the next start sees it.
+pub fn take_unclean_and_arm() -> bool {
+    let lock = lock_path();
+    let was_unclean = lock.exists();
+    if let Some(dir) = lock.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&lock, b"running");
+    was_unclean
+}
+
+/// Mark a clean shutdown so the next start does not offer to restore.
+pub fn clear_session_lock() {
+    let _ = std::fs::remove_file(lock_path());
 }
 
 impl UiState {

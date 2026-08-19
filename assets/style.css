@@ -74,15 +74,33 @@ window.hashterm.dropdown.edge-right .console-body {
   background-color: rgba(255, 255, 255, 0.25);
 }
 
-/* Tab-switch OSD: centered translucent toast. */
+/* Tab-switch OSD: centered translucent toast. The box holds either a single
+   message line or a prev/current/next "wheel". */
 .tab-osd {
   background-color: rgba(8, 10, 12, 0.62);
   color: #f2f4f6;
   border-radius: 14px;
-  padding: 16px 30px;
+  padding: 14px 30px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
+/* Generic single-line message. */
+.osd-msg {
   font-size: 19px;
   font-weight: 600;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
+/* Wheel: current tab bright and large in the middle... */
+.osd-current {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+/* ...prev/next tabs smaller and "half visible" above and below. */
+.osd-neighbor {
+  font-size: 14px;
+  font-weight: 400;
+  opacity: 0.5;
 }
 
 .tab {

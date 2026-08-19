@@ -342,8 +342,10 @@ fn unquote_title(q: &str) -> String {
     let mut chars = q.chars();
     while let Some(c) = chars.next() {
         if c == '\\' {
-            if let Some(n) = chars.next() {
-                out.push(n);
+            // A trailing lone backslash is literal, not an escape lead-in.
+            match chars.next() {
+                Some(n) => out.push(n),
+                None => out.push('\\'),
             }
         } else {
             out.push(c);

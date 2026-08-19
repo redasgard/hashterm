@@ -34,7 +34,7 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential curl ca-certificates pkg-config \
+            build-essential curl ca-certificates pkg-config git \
             libgtk-4-dev libvte-2.91-gtk4-dev libgtk4-layer-shell-dev \
             fakeroot dpkg-dev gzip gh
 

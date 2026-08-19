@@ -18,6 +18,22 @@ use crate::window::MainWindow;
 /// `startup_warning` (e.g. a config parse failure) is shown as an OSD once
 /// the window exists — silent fallback to defaults confuses users.
 pub fn run(config: Config, gtk_args: Vec<String>, startup_warning: Option<String>) -> i32 {
+    // SECURITY: a command line carrying secrets (a program + args after -e, a
+    // save name, a cwd, a config path) would be forwarded verbatim over the
+    // session bus to whoever owns our application id. If a same-UID impostor
+    // squatted the name first, it would harvest those. Refuse to forward when
+    // the current owner is not our own binary.
+    let sensitive = gtk_args.iter().any(|a| {
+        matches!(a.as_str(), "-e" | "--exec" | "--cwd" | "--restore" | "--config")
+    });
+    if sensitive && primary_is_trusted(&app_id()) == Some(false) {
+        eprintln!(
+            "hashterm: refusing to forward command line — an untrusted process holds {}",
+            app_id()
+        );
+        return 1;
+    }
+
     let app = gtk4::Application::builder()
         .application_id(app_id())
         .flags(ApplicationFlags::HANDLES_COMMAND_LINE)
@@ -73,6 +89,43 @@ pub fn run(config: Config, gtk_args: Vec<String>, startup_warning: Option<String
     });
 
     app.run_with_args(&gtk_args).into()
+}
+
+/// PID owning `app_id` on the session bus, if any (None = no owner yet, or the
+/// bus couldn't be reached).
+fn primary_owner_pid(app_id: &str) -> Option<u32> {
+    let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).ok()?;
+    let call = |method: &str, arg: &str| {
+        let param = (arg.to_string(),).to_variant();
+        bus.call_sync(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            method,
+            Some(&param),
+            None,
+            gio::DBusCallFlags::NONE,
+            1000,
+            gio::Cancellable::NONE,
+        )
+        .ok()
+    };
+    // GetNameOwner errors (returns None here) when nobody owns the name.
+    let owner = call("GetNameOwner", app_id)?;
+    let unique = owner.child_value(0).str()?.to_owned();
+    let pid_reply = call("GetConnectionUnixProcessID", &unique)?;
+    pid_reply.child_value(0).get::<u32>()
+}
+
+/// `Some(true)`  — a trusted (same-binary) primary owns the bus name;
+/// `Some(false)` — an UNTRUSTED process owns it (do not forward to it);
+/// `None`        — no primary yet, or the check couldn't complete (proceed).
+fn primary_is_trusted(app_id: &str) -> Option<bool> {
+    let pid = primary_owner_pid(app_id)?;
+    let theirs = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let ours = std::env::current_exe().ok()?;
+    let norm = |p: std::path::PathBuf| p.canonicalize().unwrap_or(p);
+    Some(norm(theirs) == norm(ours))
 }
 
 fn ensure_window(

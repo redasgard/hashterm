@@ -27,11 +27,9 @@ install -Dm644 "$root/assets/com.redasgard.Hashterm.svg" \
 install -Dm644 "$root/packaging/hashterm.1" "$pkg/usr/share/man/man1/hashterm.1"
 gzip -9n "$pkg/usr/share/man/man1/hashterm.1"
 
-# DBusActivatable=true in the desktop file needs a matching service file; the
-# GApplication in the binary owns this bus name once started.
-install -d "$pkg/usr/share/dbus-1/services"
-printf '[D-BUS Service]\nName=com.redasgard.Hashterm\nExec=/usr/bin/hashterm\n' \
-    > "$pkg/usr/share/dbus-1/services/com.redasgard.Hashterm.service"
+# No D-Bus activation service is installed on purpose: auto-activation would
+# let any session-bus peer cold-start hashterm and drive its command line.
+# Single-instance forwarding works through GApplication without it.
 
 install -d "$pkg/usr/share/doc/hashterm"
 cat > "$pkg/usr/share/doc/hashterm/copyright" <<EOF

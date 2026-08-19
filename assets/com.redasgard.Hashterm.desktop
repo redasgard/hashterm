@@ -8,7 +8,6 @@ Icon=com.redasgard.Hashterm
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupNotify=true
-DBusActivatable=true
 Actions=new-tab;toggle;
 
 [Desktop Action new-tab]

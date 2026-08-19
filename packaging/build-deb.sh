@@ -3,9 +3,22 @@
 #   packaging/build-deb.sh            -> dist/hashterm_<version>_<arch>.deb
 # Requires: dpkg-deb, fakeroot, gzip; run `cargo build --release` first.
 set -eu
+# pipefail isn't POSIX; enable it where the shell supports it so a failing
+# stage in a pipe (e.g. the version sed) aborts instead of yielding "".
+# shellcheck disable=SC3040
+(set -o pipefail) 2>/dev/null && set -o pipefail
+umask 022 # deterministic file modes regardless of the caller's umask
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
+# Tight regex + validation: the version flows into the control file and the
+# output filename, so reject anything but a Debian-ish version string.
+version=$(sed -n 's/^version = "\([0-9A-Za-z.+~-]\{1,\}\)".*/\1/p' "$root/Cargo.toml" | head -1)
+case $version in
+    "" | *[!0-9A-Za-z.+~-]*)
+        echo "refusing to build: bad version '$version'" >&2
+        exit 1
+        ;;
+esac
 arch=$(dpkg --print-architecture)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
@@ -45,8 +58,14 @@ printf 'hashterm (%s-1) unstable; urgency=medium\n\n  * Initial release.\n\n -- 
     "$version" > "$pkg/usr/share/doc/hashterm/changelog.Debian"
 gzip -9n "$pkg/usr/share/doc/hashterm/changelog.Debian"
 
-size=$(du -sk "$pkg" | cut -f1)
+# md5sums so `dpkg --verify hashterm` can detect post-install tampering.
 install -d "$pkg/DEBIAN"
+( cd "$pkg" && find . -type f ! -path './DEBIAN/*' -printf '%P\0' \
+    | LC_ALL=C sort -z \
+    | xargs -0 md5sum > DEBIAN/md5sums )
+chmod 0644 "$pkg/DEBIAN/md5sums"
+
+size=$(du -sk "$pkg" | cut -f1)
 cat > "$pkg/DEBIAN/control" <<EOF
 Package: hashterm
 Version: $version-1

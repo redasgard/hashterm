@@ -1,0 +1,7 @@
+# Pin the toolchain so CI builds (and local builds) are reproducible rather
+# than tracking a moving `stable`. At or above the workspace MSRV
+# (rust-version in Cargo.toml); the gtk4-rs 0.22 stack needs >= 1.92.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy"]
+profile = "minimal"

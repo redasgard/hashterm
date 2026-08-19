@@ -1,0 +1,32 @@
+# cargo-deny configuration. Run: cargo deny check
+# Enforced in CI (see .github/workflows/slsa-release.yml).
+
+[advisories]
+# Fail on any security advisory or unmaintained crate.
+yanked = "deny"
+
+[bans]
+# Flag duplicate versions of the same crate (e.g. x11rb 0.13 + 0.14) so the
+# dependency surface stays minimal. Downgrade to "warn" if a transitive pin
+# can't be collapsed yet.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+# Permissive licenses only; hashterm itself is MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

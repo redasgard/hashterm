@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Yevhen <yevhen@redasgard.com>"]
-rust-version = "1.90"
+rust-version = "1.92"
 
 [workspace.dependencies]
 hashterm-core = { path = "crates/hashterm-core" }
@@ -42,4 +42,4 @@ libc = "0.2"
 
 [profile.release]
 lto = "thin"
-strip = "debuginfo"
+strip = "symbols"

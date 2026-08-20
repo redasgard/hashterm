@@ -7,10 +7,13 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
-/// Restored programs may only be exec'd from these system directories. A
-/// save file is untrusted input; without this a manifest (or a poisoned
-/// `$PATH` entry like a writable `~/.local/bin`) could point argv[0] at an
-/// attacker-controlled binary.
+/// Restored programs (from an UNtrusted save) may only be exec'd from these
+/// system directories or from under the user's own $HOME. A save file is
+/// untrusted input; the point is to keep argv[0] out of WORLD-writable dirs
+/// (/tmp, /var/tmp, /dev/shm, ...) where a low-privilege attacker could plant
+/// a binary. $HOME is fine: exploiting it would already require the ability to
+/// write there, i.e. same-user code execution — and it lets a legitimately
+/// venv-/`~/.local/bin`-installed tool (jupyter, ipython) resume.
 const EXEC_ALLOW: &[&str] = &[
     "/usr/bin",
     "/usr/local/bin",
@@ -35,10 +38,11 @@ fn resolve_allowed(arg0: &str) -> Option<PathBuf> {
             ?
     };
     let real = std::fs::canonicalize(candidate).ok()?;
-    EXEC_ALLOW
-        .iter()
-        .any(|dir| real.starts_with(dir))
-        .then_some(real)
+    let in_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| !h.as_os_str().is_empty())
+        .is_some_and(|home| real.starts_with(&home));
+    (in_home || EXEC_ALLOW.iter().any(|dir| real.starts_with(dir))).then_some(real)
 }
 
 pub fn run_restore_pane(

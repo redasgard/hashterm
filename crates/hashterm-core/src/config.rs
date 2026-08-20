@@ -358,6 +358,9 @@ impl Default for RestoreCfg {
                 "ssh",
                 "lazygit",
                 "k9s",
+                "psql",
+                "jupyter",
+                "ipython",
             ]
             .map(String::from)
             .to_vec(),

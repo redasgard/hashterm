@@ -150,11 +150,16 @@ restore_on_start = false
 prompt_on_start = true
 
 [restore]
-# Programs restarted automatically on restore (matched by basename).
-# sudo/su/passwd and friends are always refused.
+# Programs re-run (with their original arguments) automatically on restore,
+# matched by basename — psql reconnects to the same database, nvim reopens the
+# same files, jupyter relaunches the same subcommand. sudo/su/passwd and
+# friends are always refused. From an untrusted save these must live in a
+# system dir or under your $HOME (so a venv / ~/.local/bin copy still resumes),
+# never a world-writable dir like /tmp.
 programs = [
     "vim", "nvim", "htop", "btop", "top", "tail", "watch",
     "journalctl", "man", "less", "ssh", "lazygit", "k9s",
+    "psql", "jupyter", "ipython",
 ]
 # true = restart ANY captured command on restore (careful).
 restart_arbitrary = false

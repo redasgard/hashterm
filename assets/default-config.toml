@@ -159,7 +159,10 @@ prompt_on_start = true
 programs = [
     "vim", "nvim", "htop", "btop", "top", "tail", "watch",
     "journalctl", "man", "less", "ssh", "lazygit", "k9s",
-    "psql", "jupyter", "ipython",
+    "psql", "jupyter", "ipython", "mysql", "sqlite3", "redis-cli",
+    "mongosh", "tig", "gitui", "ranger", "nnn", "lf", "yazi",
+    "glances", "bpytop", "weechat", "irssi", "aider", "ncdu",
+    "mosh", "mosh-client",
 ]
 # true = restart ANY captured command on restore (careful).
 restart_arbitrary = false

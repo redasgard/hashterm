@@ -77,6 +77,15 @@ pub struct FgProc {
     pub argv: Vec<String>,
     /// /proc/<pid>/cwd — where the program itself lives, may differ from pane cwd.
     pub cwd: PathBuf,
+    /// Resume-relevant environment (VIRTUAL_ENV, CONDA_DEFAULT_ENV, …) captured
+    /// from the process, so restore can re-activate the same env. NOT the full
+    /// environment — only an allow-list, to avoid capturing secrets.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// TCP ports the foreground process group was LISTENing on — marks the
+    /// pane as a server so restore offers it rather than silently re-binding.
+    #[serde(default)]
+    pub listening: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

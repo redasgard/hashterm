@@ -187,8 +187,11 @@ fn restore_session(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "hashterm".into());
             for pane in &window.panes {
+                // Pre-type panes that weren't auto-restarted (servers, venv
+                // programs, and unrestored commands) and aren't resume recipes.
                 if let Some(fg) = &pane.fg
-                    && !restartable(fg, opts)
+                    && resume_recipe(fg, opts).is_none()
+                    && !wants_exec(fg, opts)
                     && !argv_has_denied(&fg.argv)
                 {
                     if !is_safe_pretype(&fg.argv) {
@@ -200,11 +203,27 @@ fn restore_session(
                     }
                     let target = format!("{win_target}.{}", pane.index);
                     wait_for_shell(ctl, &target, &helper_name);
-                    let cmdline = shell_join(&fg.argv);
+                    // Re-activate the captured venv/conda env first, if any, so
+                    // the pre-typed command resolves the right interpreter.
+                    let cmdline = match venv_activation(fg) {
+                        Some(activate) => format!("{activate} && {}", shell_join(&fg.argv)),
+                        None => shell_join(&fg.argv),
+                    };
                     if let Err(e) = ctl.run(&["send-keys", "-t", &target, "-l", &cmdline]) {
                         report
                             .notes
                             .push(format!("could not pre-type command in {target}: {e}"));
+                    } else if is_server(fg) {
+                        report.notes.push(format!(
+                            "pane {}.{} was a server on port {}; command pre-typed — press Enter to relaunch",
+                            window.index,
+                            pane.index,
+                            fg.listening
+                                .iter()
+                                .map(|p| p.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
                     }
                 }
             }
@@ -305,21 +324,14 @@ fn spawn_command(
         argv.push(shell.clone());
     }
     if let Some(fg) = &pane.fg {
-        // Resume recipe (trusted config) wins: run the user's resume argv in
-        // the pane's cwd so the program resumes its own state. Emitted as
-        // --exec-trusted so restore-pane skips the exec allow-list (which
-        // guards UNtrusted, save-derived argv, not user config).
-        if let Some(recipe) = fg
-            .argv
-            .first()
-            .map(|a| basename_lower(a))
-            .filter(|b| !b.is_empty())
-            .and_then(|b| opts.resume.get(&b))
-            .filter(|_| !argv_has_denied(&fg.argv))
-        {
+        if let Some(recipe) = resume_recipe(fg, opts) {
+            // Resume recipe (trusted config): run the user's resume argv in the
+            // pane's cwd. --exec-trusted skips the exec allow-list (which guards
+            // UNtrusted, save-derived argv, not user config).
             argv.push("--exec-trusted".into());
             argv.extend(recipe.iter().cloned());
-        } else if restartable(fg, opts) {
+        } else if wants_exec(fg, opts) {
+            // Auto-restart a safe-listed program with its original argv.
             argv.push("--exec".into());
             let mut exec_argv = fg.argv.clone();
             // Editor state: vim/nvim resume a Session.vim from the program's
@@ -327,7 +339,7 @@ fn spawn_command(
             // SECURITY: Session.vim runs arbitrary Ex commands, so only trust
             // one discovered in the PANE's own cwd (not a manifest-chosen
             // directory), under $HOME, and reached without a symlink.
-            if matches!(fg.name.as_str(), "vim" | "nvim" | "vi")
+            if matches!(effective_name(fg).as_str(), "vim" | "nvim" | "vi")
                 && !exec_argv.iter().any(|a| a == "-S")
                 && fg.cwd == pane.cwd
                 && home_dir().is_some_and(|h| fg.cwd.starts_with(&h))
@@ -342,10 +354,12 @@ fn spawn_command(
                 }
             }
             argv.extend(exec_argv);
-        } else if !DENYLIST.contains(&fg.name.as_str()) && !opts.pretype_unrestored {
+        } else if !argv_has_denied(&fg.argv) && !opts.pretype_unrestored {
+            // Servers, venv programs and unrestored commands are pre-typed
+            // (see restore_session); note only when pre-type is off.
             report.notes.push(format!(
-                "'{}' not in restore.programs safe-list; pane restored as shell",
-                fg.name
+                "'{}' restored as a shell (not auto-restarted)",
+                effective_name(fg)
             ));
         }
     }
@@ -373,6 +387,124 @@ fn argv_has_denied(argv: &[String]) -> bool {
         .any(|a| DENYLIST.contains(&basename_lower(a).as_str()))
 }
 
+/// Peel common wrappers/runners off argv to find the program that actually
+/// matters for matching (safe-list / resume recipe), e.g.
+/// `uv run jupyter lab` -> "jupyter", `python -m http.server` -> "http.server",
+/// `nohup psql …` -> "psql", `env A=b redis-cli` -> "redis-cli". Only the NAME
+/// is derived here — the original argv is still what gets run, so the wrapper's
+/// own effect (env activation, etc.) is preserved.
+fn effective_name(fg: &FgProc) -> String {
+    let argv = &fg.argv;
+    let mut i = 0;
+    while let Some(tok) = argv.get(i) {
+        match basename_lower(tok).as_str() {
+            // Transparent launchers: skip the wrapper and its own flags.
+            "nohup" | "setsid" | "stdbuf" | "time" | "nice" | "ionice" | "doas" | "catchsegv" => {
+                i += 1;
+                while argv.get(i).is_some_and(|t| t.starts_with('-')) {
+                    i += 1;
+                }
+            }
+            // `env [-i] [-u NAME] [-C DIR] [VAR=val ...] cmd`
+            "env" => {
+                i += 1;
+                while let Some(t) = argv.get(i) {
+                    if t == "-u" || t == "-C" {
+                        i += 2;
+                    } else if t.starts_with('-') || t.contains('=') {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // `<runner> run cmd …`
+            "uv" | "poetry" | "pdm" | "rye" | "pipenv" | "hatch"
+                if argv.get(i + 1).map(String::as_str) == Some("run") =>
+            {
+                i += 2;
+            }
+            // `npx [flags] cmd …`
+            "npx" | "pnpx" | "bunx" => {
+                i += 1;
+                while argv.get(i).is_some_and(|t| t.starts_with('-')) {
+                    i += 1;
+                }
+            }
+            // `python -m MODULE …` -> the module name.
+            "python" | "python3" | "python2"
+                if argv.get(i + 1).map(String::as_str) == Some("-m") =>
+            {
+                return argv
+                    .get(i + 2)
+                    .map(|m| m.to_ascii_lowercase())
+                    .unwrap_or_default();
+            }
+            // `sh -c "cmd …"` -> the first word of the script.
+            "sh" | "bash" | "zsh" | "dash" | "fish"
+                if argv.get(i + 1).map(String::as_str) == Some("-c") =>
+            {
+                return argv
+                    .get(i + 2)
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(basename_lower)
+                    .unwrap_or_default();
+            }
+            _ => break,
+        }
+    }
+    argv.get(i).map(|t| basename_lower(t)).unwrap_or_default()
+}
+
+/// Single-quote a value for a shell command (used to build activation prefixes).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The command that re-activates the pane's captured venv/conda env, if any.
+/// conda takes precedence over a bare VIRTUAL_ENV; a "base" conda env is a
+/// no-op and skipped.
+fn venv_activation(fg: &FgProc) -> Option<String> {
+    let get = |key: &str| {
+        fg.env
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    if let Some(name) = get("CONDA_DEFAULT_ENV")
+        && name != "base"
+        && !name.is_empty()
+    {
+        return Some(format!("conda activate {}", sh_quote(&name)));
+    }
+    if let Some(venv) = get("VIRTUAL_ENV").filter(|v| !v.is_empty()) {
+        return Some(format!("source {}", sh_quote(&format!("{venv}/bin/activate"))));
+    }
+    None
+}
+
+/// A pane that was listening on a TCP port is a server: restore OFFERS it
+/// (pre-types the command) rather than silently re-binding the port.
+fn is_server(fg: &FgProc) -> bool {
+    !fg.listening.is_empty()
+}
+
+/// The resume recipe (trusted user config) matching this pane, if any.
+fn resume_recipe<'a>(fg: &FgProc, opts: &'a RestoreOptions) -> Option<&'a Vec<String>> {
+    if argv_has_denied(&fg.argv) {
+        return None;
+    }
+    let name = effective_name(fg);
+    (!name.is_empty()).then(|| opts.resume.get(&name)).flatten()
+}
+
+/// The pane should be auto-restarted with `--exec` (its original argv): a
+/// safe-listed program that is neither a server nor tied to a venv (those are
+/// offered via pre-type instead, so ports aren't re-bound and the env is right).
+fn wants_exec(fg: &FgProc, opts: &RestoreOptions) -> bool {
+    !is_server(fg) && venv_activation(fg).is_none() && restartable(fg, opts)
+}
+
 fn restartable(fg: &FgProc, opts: &RestoreOptions) -> bool {
     let Some(arg0) = fg.argv.first() else {
         return false;
@@ -383,17 +515,18 @@ fn restartable(fg: &FgProc, opts: &RestoreOptions) -> bool {
     // then decide on the derived basename, and refuse if ANY argv token is a
     // denylisted program.
     let base = basename_lower(arg0);
+    // Integrity: the manifest's advisory name must match the real argv[0].
     if base.is_empty() || fg.name.to_ascii_lowercase() != base {
         return false;
     }
     if argv_has_denied(&fg.argv) {
         return false;
     }
+    // Membership is tested against the UNWRAPPED program (uv run jupyter ->
+    // jupyter), so wrapped invocations match the safe-list too.
+    let eff = effective_name(fg);
     opts.restart_arbitrary
-        || opts
-            .programs
-            .iter()
-            .any(|p| p.to_ascii_lowercase() == base)
+        || opts.programs.iter().any(|p| p.eq_ignore_ascii_case(&eff))
 }
 
 /// Pre-typing puts these bytes under the shell cursor via `send-keys -l`,
@@ -480,6 +613,8 @@ mod tests {
             name: "sudo".into(),
             argv: vec!["sudo".into(), "rm".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         };
         let mut o = opts();
         o.restart_arbitrary = true;
@@ -492,11 +627,15 @@ mod tests {
             name: "htop".into(),
             argv: vec!["htop".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         };
         let make = FgProc {
             name: "make".into(),
             argv: vec!["make".into(), "-j8".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         };
         assert!(restartable(&htop, &opts()));
         assert!(!restartable(&make, &opts()));
@@ -512,6 +651,8 @@ mod tests {
             name: "htop".into(),
             argv: vec!["htop".into(), "-d".into(), "10".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         }));
         let cmd = spawn_command(&p, Path::new("/tmp/save"), &opts(), &mut report);
         assert!(cmd.contains("'--exec' 'htop' '-d' '10'"));
@@ -527,6 +668,8 @@ mod tests {
             name: "htop".into(),
             argv: vec!["/tmp/payload".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         };
         let mut o = opts();
         o.programs = vec!["htop".into()];
@@ -540,6 +683,8 @@ mod tests {
             name: "env".into(),
             argv: vec!["env".into(), "sudo".into(), "sh".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         };
         let mut o = opts();
         o.programs = vec!["env".into()];
@@ -549,6 +694,8 @@ mod tests {
             name: "ssh".into(),
             argv: vec!["/usr/bin/sudo".into(), "-n".into()],
             cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         };
         let mut o2 = opts();
         o2.programs = vec!["ssh".into()];
@@ -593,6 +740,8 @@ mod tests {
             name: "claude".into(),
             argv: vec!["claude".into()],
             cwd: "/home/u/proj".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
         }));
         let mut report = RestoreReport::default();
         let cmd = spawn_command(&p, Path::new("/tmp/save"), &o, &mut report);
@@ -609,5 +758,77 @@ mod tests {
         assert!(!valid_session_name("=evil"));
         assert!(!valid_session_name(&"x".repeat(65)));
         assert!(!valid_session_name(""));
+    }
+
+    // --- detection features (#1 venv, #2 server, #3 unwrap) ---
+
+    fn fgp(argv: &[&str]) -> FgProc {
+        let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        FgProc {
+            name: argv
+                .first()
+                .map(|a| basename_lower(a))
+                .unwrap_or_default(),
+            argv,
+            cwd: "/".into(),
+            env: Vec::new(),
+            listening: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn effective_name_unwraps_runners() {
+        assert_eq!(effective_name(&fgp(&["uv", "run", "jupyter", "lab"])), "jupyter");
+        assert_eq!(effective_name(&fgp(&["poetry", "run", "ipython"])), "ipython");
+        assert_eq!(effective_name(&fgp(&["nohup", "psql", "-h", "db"])), "psql");
+        assert_eq!(effective_name(&fgp(&["env", "A=b", "redis-cli"])), "redis-cli");
+        assert_eq!(effective_name(&fgp(&["python", "-m", "http.server"])), "http.server");
+        assert_eq!(effective_name(&fgp(&["sh", "-c", "flask run --port 5000"])), "flask");
+        assert_eq!(effective_name(&fgp(&["/usr/bin/htop"])), "htop");
+    }
+
+    #[test]
+    fn wrapped_program_matches_safelist_and_recipe() {
+        // uv run jupyter -> jupyter is safe-listed -> restartable.
+        let mut o = opts();
+        o.programs = vec!["jupyter".into()];
+        assert!(restartable(&fgp(&["uv", "run", "jupyter", "lab"]), &o));
+        // uv run claude -> matches the claude resume recipe (by unwrapped name).
+        o.resume = [("claude".into(), vec!["claude".into(), "--continue".into()])]
+            .into_iter()
+            .collect();
+        assert!(resume_recipe(&fgp(&["uv", "run", "claude"]), &o).is_some());
+    }
+
+    #[test]
+    fn venv_activation_built_from_env() {
+        let mut fg = fgp(&["ipython"]);
+        fg.env = vec![("VIRTUAL_ENV".into(), "/home/u/proj/.venv".into())];
+        assert_eq!(
+            venv_activation(&fg).as_deref(),
+            Some("source '/home/u/proj/.venv/bin/activate'")
+        );
+        fg.env = vec![("CONDA_DEFAULT_ENV".into(), "ml".into())];
+        assert_eq!(venv_activation(&fg).as_deref(), Some("conda activate 'ml'"));
+        // conda "base" is a no-op.
+        fg.env = vec![("CONDA_DEFAULT_ENV".into(), "base".into())];
+        assert_eq!(venv_activation(&fg), None);
+    }
+
+    #[test]
+    fn server_and_venv_are_offered_not_auto_restarted() {
+        let mut o = opts();
+        o.programs = vec!["jupyter".into(), "ipython".into()];
+        // a listening jupyter is a server -> not auto-exec (offered instead).
+        let mut server = fgp(&["jupyter", "lab"]);
+        server.listening = vec![8888];
+        assert!(is_server(&server));
+        assert!(!wants_exec(&server, &o));
+        // a venv ipython -> not auto-exec (pre-typed with activation instead).
+        let mut venv = fgp(&["ipython"]);
+        venv.env = vec![("VIRTUAL_ENV".into(), "/home/u/.venv".into())];
+        assert!(!wants_exec(&venv, &o));
+        // a plain safe-listed program still auto-execs.
+        assert!(wants_exec(&fgp(&["ipython"]), &o));
     }
 }

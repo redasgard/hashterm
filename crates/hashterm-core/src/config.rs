@@ -386,11 +386,14 @@ impl Default for RestoreCfg {
             pretype_unrestored: true,
             exclude_panes: Vec::new(),
             max_scrollback_lines: 0,
-            resume: [("claude".to_string(), vec![
-                "claude".to_string(),
-                "--continue".to_string(),
-            ])]
+            resume: [
+                ("claude", vec!["claude", "--continue"]),
+                ("codex", vec!["codex", "resume", "--last"]),
+                ("cursor-agent", vec!["cursor-agent", "--continue"]),
+                ("skuld", vec!["skuld", "swarm", "--resume"]),
+            ]
             .into_iter()
+            .map(|(k, v)| (k.to_string(), v.into_iter().map(String::from).collect()))
             .collect(),
         }
     }

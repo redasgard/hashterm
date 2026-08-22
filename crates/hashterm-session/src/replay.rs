@@ -38,11 +38,36 @@ fn resolve_allowed(arg0: &str) -> Option<PathBuf> {
             ?
     };
     let real = std::fs::canonicalize(candidate).ok()?;
-    let in_home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|h| !h.as_os_str().is_empty())
-        .is_some_and(|home| real.starts_with(&home));
-    (in_home || EXEC_ALLOW.iter().any(|dir| real.starts_with(dir))).then_some(real)
+    let in_system = EXEC_ALLOW.iter().any(|dir| real.starts_with(dir));
+    let in_home = under_home(&real);
+    if !in_system && !in_home {
+        return None;
+    }
+    // A binary under $HOME (the attacker-plant surface) must at least not be
+    // group/world-writable — that rejects a payload dropped with loose modes.
+    if in_home && !in_system {
+        use std::os::unix::fs::MetadataExt;
+        let writable = std::fs::metadata(&real).map(|m| m.mode() & 0o022 != 0).unwrap_or(true);
+        if writable {
+            return None;
+        }
+    }
+    Some(real)
+}
+
+/// A resolved binary sits strictly BELOW $HOME. Rejects an empty/`/` HOME (which
+/// would make `starts_with($HOME)` true for every path and void the allow-list)
+/// and requires at least one path component beyond HOME (never HOME itself).
+fn under_home(real: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    if home.as_os_str().is_empty() || home == Path::new("/") {
+        return false;
+    }
+    let home = std::fs::canonicalize(&home).unwrap_or(home);
+    real.strip_prefix(&home)
+        .is_ok_and(|rest| rest.components().next().is_some())
 }
 
 pub fn run_restore_pane(

@@ -11,7 +11,12 @@ yanked = "deny"
 # windows-sys, …) are unavoidable transitive splits in the gtk-rs stack, so
 # this stays a warning rather than "deny".
 multiple-versions = "warn"
+# Deny wildcard version requirements — EXCEPT for the internal workspace crates,
+# which reference each other by `path` with `version = "*"` (idiomatic and safe:
+# they resolve to the in-tree copy, never crates.io). This keeps the check
+# meaningful for real (registry) wildcard deps.
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [licenses]
 # Permissive licenses only; hashterm itself is MIT.

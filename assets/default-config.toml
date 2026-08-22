@@ -180,8 +180,22 @@ max_scrollback_lines = 0
 # The key is the program's basename; the value is the argv to run in its cwd.
 # TRUSTED (this is your config): a recipe may run a program from anywhere on
 # your PATH, unlike a command captured from a save file.
+#
+# A recipe REPLACES the captured command, so it fits conversation-style CLIs
+# you launch with no arguments. Tools you launch WITH arguments — editors,
+# psql, ssh — resume better via the [restore] safe-list above, which keeps
+# their arguments; that is where nvim/psql/redis-cli/… already live.
+#
+# Only `claude` is enabled by default (its flag is stable). The rest are
+# examples — uncomment the ones you use and CHECK the resume flag for your
+# version first: a wrong command makes the pane exit on restore.
 [restore.resume]
 claude = ["claude", "--continue"]
+# aider  = ["aider", "--restore-chat-history"]   # reopen the prior aider chat
+# llm    = ["llm", "chat", "-c"]                  # simonw/llm: -c continues last
+# codex  = ["codex", "resume", "--last"]          # OpenAI Codex CLI
+# goose  = ["goose", "session", "resume"]         # block/goose
+# chatgpt = ["chatgpt", "--continue"]             # your ChatGPT CLI wrapper
 
 [tmux]
 # true = stock tmux window keybindings inside a tab (re-enables the tmux

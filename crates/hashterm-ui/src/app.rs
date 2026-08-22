@@ -124,7 +124,15 @@ fn primary_is_trusted(app_id: &str) -> Option<bool> {
     let pid = primary_owner_pid(app_id)?;
     let theirs = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let ours = std::env::current_exe().ok()?;
-    let norm = |p: std::path::PathBuf| p.canonicalize().unwrap_or(p);
+    // A running instance whose binary was replaced by a package upgrade reads
+    // "/usr/bin/hashterm (deleted)"; strip the suffix before comparing so a
+    // legitimate primary is still recognized post-upgrade (else secondaries
+    // would be refused until the primary restarts).
+    let norm = |p: std::path::PathBuf| {
+        let s = p.to_string_lossy();
+        let p = std::path::PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s).to_string());
+        p.canonicalize().unwrap_or(p)
+    };
     Some(norm(theirs) == norm(ours))
 }
 

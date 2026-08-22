@@ -310,6 +310,19 @@ fn run_restore(
 /// `--restart`: stop the running GUI (gracefully, so it snapshots) and launch
 /// a fresh detached instance. Terminals live on the tmux server, which stays
 /// up, so the new instance simply re-adopts them.
+/// Does a `/proc/<pid>/exe` link target name the same binary as `our_exe`?
+///
+/// `our_exe` is already canonicalized. The link may carry a trailing
+/// " (deleted)" when the on-disk binary was replaced by a package
+/// upgrade/reinstall — the running process is unchanged, so strip it before
+/// comparing. Exact-path (not basename) match keeps this immune to
+/// prctl(PR_SET_NAME) `comm` spoofing.
+fn same_binary(link_target: &std::path::Path, our_exe: &std::path::Path) -> bool {
+    let s = link_target.to_string_lossy();
+    let theirs = std::path::Path::new(s.strip_suffix(" (deleted)").unwrap_or(&s));
+    our_exe == theirs
+}
+
 fn run_restart(config: Option<&std::path::Path>) -> std::process::ExitCode {
     use std::os::unix::process::CommandExt;
 
@@ -320,13 +333,12 @@ fn run_restart(config: Option<&std::path::Path>) -> std::process::ExitCode {
     // forged with prctl(PR_SET_NAME), unlike /proc/<pid>/comm) against our own.
     let our_exe = std::env::current_exe()
         .ok()
-        .and_then(|p| p.canonicalize().ok());
+        .map(|p| p.canonicalize().unwrap_or(p));
     let is_hashterm = |pid: u32| {
         std::fs::read_link(format!("/proc/{pid}/exe"))
             .ok()
-            .and_then(|p| p.canonicalize().ok())
-            .zip(our_exe.clone())
-            .is_some_and(|(theirs, ours)| theirs == ours)
+            .zip(our_exe.as_deref())
+            .is_some_and(|(link, ours)| same_binary(&link, ours))
     };
     let self_pid = std::process::id();
     if let Some(pid) = hashterm_core::state::running_pid()
@@ -407,5 +419,24 @@ fn run_saves() -> std::process::ExitCode {
             eprintln!("hashterm saves: {e}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_binary;
+    use std::path::Path;
+
+    #[test]
+    fn same_binary_matches_exact_and_deleted() {
+        let ours = Path::new("/usr/bin/hashterm");
+        // Normal running instance.
+        assert!(same_binary(Path::new("/usr/bin/hashterm"), ours));
+        // After apt --reinstall/upgrade: exe link gains " (deleted)".
+        assert!(same_binary(Path::new("/usr/bin/hashterm (deleted)"), ours));
+        // A different binary (or a comm-spoofed impostor at another path) is not.
+        assert!(!same_binary(Path::new("/home/x/hashterm"), ours));
+        assert!(!same_binary(Path::new("/usr/bin/sleep"), ours));
+        assert!(!same_binary(Path::new("/usr/bin/sleep (deleted)"), ours));
     }
 }

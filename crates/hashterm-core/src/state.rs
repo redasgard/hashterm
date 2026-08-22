@@ -38,6 +38,32 @@ fn lock_path() -> PathBuf {
     data_dir().join("running.lock")
 }
 
+/// Create the data dir 0700 (owner-only). The dir holds save metadata, the
+/// running-lock PID, and window state — none secret, but on a shared host they
+/// shouldn't be world-readable, and the socket dir is already 0700.
+fn ensure_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+}
+
+/// Write `data` to `p` as a 0600 regular file, refusing to follow a symlink
+/// planted at the path (a same-UID process could otherwise redirect the write).
+fn write_private(p: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(p)?;
+    f.write_all(data)
+}
+
 /// Browser-style unclean-exit detection. Returns true if the previous run did
 /// NOT exit cleanly (the lock from that run is still present), then arms the
 /// lock for this run. A clean exit calls `clear_session_lock`; a crash / kill
@@ -46,10 +72,10 @@ pub fn take_unclean_and_arm() -> bool {
     let lock = lock_path();
     let was_unclean = lock.exists();
     if let Some(dir) = lock.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = ensure_data_dir(dir);
     }
     // Store our PID so `hashterm --restart` can find the running instance.
-    let _ = std::fs::write(&lock, std::process::id().to_string());
+    let _ = write_private(&lock, std::process::id().to_string().as_bytes());
     was_unclean
 }
 
@@ -77,10 +103,10 @@ impl UiState {
     pub fn save(&self) {
         let p = path();
         if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = ensure_data_dir(dir);
         }
         if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(&p, json);
+            let _ = write_private(&p, &json);
         }
     }
 }

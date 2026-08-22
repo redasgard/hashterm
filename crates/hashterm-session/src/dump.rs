@@ -156,6 +156,8 @@ fn build_manifest(
 
     // Panes. pane_current_path can contain tabs, so it is the LAST field.
     let pfmt = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{pane_pid}\t#{pane_current_command}\t#{alternate_on}\t#{pane_in_mode}\t#{q:pane_title}\t#{pane_current_path}";
+    // One /proc + /proc/net snapshot for the whole dump (not per pane).
+    let scan = procinfo::ProcScan::new();
     for line in ctl.run(&["list-panes", "-a", "-F", pfmt])?.lines() {
         let f: Vec<&str> = line.splitn(11, '\t').collect();
         let [
@@ -182,7 +184,7 @@ fn build_manifest(
         let fg = shell_pid
             .parse::<u32>()
             .ok()
-            .and_then(|p| procinfo::foreground_process(p, cmd));
+            .and_then(|p| procinfo::foreground_process_scanned(&scan, p, cmd));
         let alternate_on = *alt == "1";
 
         let scrollback = if excluded(opts, title, cmd) || alternate_on {

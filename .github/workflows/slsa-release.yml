@@ -48,9 +48,12 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Supply-chain audit
+        # No `|| true`: a failed install or a real finding (advisory, banned
+        # crate/source, disallowed license) must FAIL the release, not print an
+        # easy-to-miss warning while the build+publish proceeds unaudited.
         run: |
-          cargo install --locked cargo-deny || true
-          cargo deny check advisories bans sources || echo "::warning::cargo-deny reported findings"
+          cargo install --locked cargo-deny
+          cargo deny check advisories bans sources licenses
 
       - name: Build .deb
         run: |

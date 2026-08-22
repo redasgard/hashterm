@@ -314,12 +314,19 @@ fn run_restart(config: Option<&std::path::Path>) -> std::process::ExitCode {
     use std::os::unix::process::CommandExt;
 
     let alive = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-    // Only signal a PID that is actually a hashterm: a stale lock's PID may
-    // have been reused by an unrelated process, and we must never SIGTERM that.
+    // Only signal a PID that is actually a hashterm: a stale lock's PID may have
+    // been reused by an unrelated process, and we must never SIGTERM that. Verify
+    // via /proc/<pid>/exe (which resolves to the on-disk binary and cannot be
+    // forged with prctl(PR_SET_NAME), unlike /proc/<pid>/comm) against our own.
+    let our_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok());
     let is_hashterm = |pid: u32| {
-        std::fs::read_to_string(format!("/proc/{pid}/comm"))
-            .map(|c| c.trim() == "hashterm")
-            .unwrap_or(false)
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+            .zip(our_exe.clone())
+            .is_some_and(|(theirs, ours)| theirs == ours)
     };
     let self_pid = std::process::id();
     if let Some(pid) = hashterm_core::state::running_pid()
@@ -340,6 +347,12 @@ fn run_restart(config: Option<&std::path::Path>) -> std::process::ExitCode {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
+        // A deliberate restart is a CLEAN stop: clear the lock the SIGTERM
+        // handler intentionally leaves behind, so the fresh instance doesn't
+        // greet the user with a spurious "restore previous session?" prompt.
+        // (If no instance was running, a stale lock from a real crash is left
+        // in place so genuine crash-recovery still offers a restore.)
+        hashterm_core::state::clear_session_lock();
     }
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hashterm"));

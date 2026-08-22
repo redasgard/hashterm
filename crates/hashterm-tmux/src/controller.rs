@@ -304,12 +304,15 @@ pub fn sanitize_group_name(name: &str) -> String {
         .collect()
 }
 
-/// Strip the delimiter/newline bytes that would corrupt the tab-delimited
-/// `list-sessions -F` wire format, and cap length. Applied to every value we
-/// write into a session user-option (title especially: a newline there would
-/// inject a spurious line into list-sessions output and break parsing).
+/// Strip control characters (which would corrupt the tab-delimited
+/// `list-sessions -F` wire format, and — for the title — crash Pango's XML
+/// parser in `set_markup`, blanking the tab-switch OSD), then cap length.
+/// Applied to every value we write into a session user-option, and re-applied
+/// on read since a pane process can set the option directly on the shared
+/// server, bypassing our writers. `char::is_control` covers `\t`/`\n`/`\r`
+/// plus the whole C0/C1 + DEL range.
 pub fn sanitize_option_value(s: &str) -> String {
-    s.replace(['\t', '\n', '\r'], " ").chars().take(256).collect()
+    s.chars().filter(|c| !c.is_control()).take(256).collect()
 }
 
 /// A `#rrggbb` color or nothing. Validated at BOTH the write boundary and the

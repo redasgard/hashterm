@@ -1,5 +1,6 @@
 [package]
 name = "hashterm-core"
+publish = false  # app crate; never published to crates.io
 version.workspace = true
 edition.workspace = true
 license.workspace = true

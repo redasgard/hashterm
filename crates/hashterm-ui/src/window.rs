@@ -2191,6 +2191,7 @@ impl MainWindow {
         } else {
             bar.set_halign(gtk4::Align::Fill);
             bar.set_valign(gtk4::Align::Fill);
+            pin_bar_expand(&bar, edge);
             let (col, row) = match edge {
                 Edge::Top => (1, 0),
                 Edge::Bottom => (1, 2),
@@ -2284,6 +2285,7 @@ impl MainWindow {
         }
         bar.set_halign(gtk4::Align::Fill);
         bar.set_valign(gtk4::Align::Fill);
+        pin_bar_expand(&bar, edge);
         let (col, row) = match edge {
             Edge::Top => (1, 0),
             Edge::Bottom => (1, 2),
@@ -2696,6 +2698,17 @@ impl MainWindow {
 /// The group bar's edge: the configured one, unless it is parallel to the
 /// tab bar — the matrix needs perpendicular axes, so a parallel setting (or
 /// none) resolves to the default perpendicular edge.
+/// A bar docked on a side edge must not claim spare width (and a top/bottom
+/// bar not spare height). GTK propagates a child's expand flag upward - the
+/// row labels are hexpand - so without an explicit flag the grid column of a
+/// left/right bar competes with the terminal column for the window's extra
+/// width and the bar balloons to a third of the window.
+fn pin_bar_expand(bar: &impl IsA<gtk4::Widget>, edge: Edge) {
+    let side = matches!(edge, Edge::Left | Edge::Right);
+    bar.set_hexpand(!side);
+    bar.set_vexpand(side);
+}
+
 /// `names` with `name` moved to `index` (clamped); None when it is unknown or
 /// already there.
 fn reordered(names: &[String], name: &str, index: usize) -> Option<Vec<String>> {

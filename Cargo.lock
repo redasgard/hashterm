@@ -927,7 +927,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hashterm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "hashterm-core",
@@ -940,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "hashterm-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "libc",
  "serde",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "hashterm-ctl"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "hashterm-core",
  "serde_json",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "hashterm-platform"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ashpd",
  "async-channel",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "hashterm-session"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "hashterm-core",
  "hashterm-tmux",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "hashterm-tmux"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-channel",
  "hashterm-core",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "hashterm-ui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-channel",
  "gtk4",

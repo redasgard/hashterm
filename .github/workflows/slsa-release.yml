@@ -1,7 +1,20 @@
-# Build the hashterm .deb and publish SLSA provenance for it.
+# Build the hashterm .deb, generate SLSA provenance for it, and stage both in a
+# DRAFT GitHub release. A human publishes the draft.
 #
-# Runs on every published release (and by hand via workflow_dispatch). The
-# build happens in a debian:trixie (Debian 13) container: hashterm needs
+# Why a draft: this repository uses GitHub's immutable releases. Once a release
+# is published its assets can never be added, replaced or deleted, so everything
+# that belongs to it (the .deb AND its provenance) must be attached BEFORE
+# publishing. Attaching after publish fails with "Cannot delete asset from an
+# immutable release". A published release also burns its tag name for good.
+#
+# To release: bump `version` in Cargo.toml, commit, push, then
+#   git tag -a vX.Y.Z -m "hashterm X.Y.Z" && git push origin vX.Y.Z
+# CI builds and creates the draft release vX.Y.Z (a tag containing "-", such as
+# v0.3.0-rc1, becomes a pre-release). Edit the notes if you like, then Publish.
+# Run by hand (workflow_dispatch) it only builds and keeps the artifacts.
+# See docs/RELEASING.md.
+#
+# The build happens in a debian:trixie (Debian 13) container: hashterm needs
 # GTK >= 4.18 and VTE >= 0.80, newer than any ubuntu-latest runner image ships,
 # and building on stable keeps the .deb's glibc floor installable on Debian 13.
 #
@@ -10,15 +23,15 @@
 # the toolchain is already pinned via rust-toolchain.toml. The
 # slsa-github-generator reusable workflow MUST stay pinned by tag (its own
 # verification depends on it). Verify downloads with:
-#   slsa-verifier verify-artifact hashterm_*.deb \
-#     --provenance-path *.intoto.jsonl \
-#     --source-uri github.com/redasgard/hashterm
+#   slsa-verifier verify-artifact hashterm_X.Y.Z-1_amd64.deb \
+#     --provenance-path hashterm_X.Y.Z-1_amd64.deb.intoto.jsonl \
+#     --source-uri github.com/redasgard/hashterm --source-tag vX.Y.Z
 
 name: release
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-  release:
-    types: [published]
 
 permissions: read-all
 
@@ -32,6 +45,20 @@ jobs:
       hashes: ${{ steps.hash.outputs.hashes }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Tag matches the package version
+        # A v0.2.3 tag on a tree that still says 0.2.2 would publish a release
+        # whose .deb has the wrong version. Fail before the long build.
+        if: github.ref_type == 'tag'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${REF_NAME#v}"; tag="${tag%%-*}"
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag $REF_NAME does not match Cargo.toml version $ver"
+            exit 1
+          fi
 
       - name: Install build dependencies
         run: |
@@ -73,11 +100,28 @@ jobs:
           name: hashterm-deb
           path: dist/hashterm_*.deb
 
-  # Separate job so contents:write (release upload) is scoped to just this
-  # step, not held for the whole build (where a build.rs could abuse it).
-  upload:
+  # Signed provenance for the .deb. It is NOT uploaded to a release here
+  # (upload-assets: false): the generator would add it to an already-published,
+  # immutable release and fail. It stays a workflow artifact and the
+  # draft-release job below attaches it before anything is published.
+  provenance:
     needs: [build]
-    if: github.event_name == 'release'
+    permissions:
+      actions: read   # read the workflow path
+      id-token: write # sign the provenance
+      contents: write # required by the reusable workflow's own upload job
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: false
+
+  # Separate job so contents:write is scoped to just this step, not held for the
+  # whole build (where a build.rs could abuse it). It only ever creates or
+  # refreshes a DRAFT: if the release was already published (immutable) the
+  # upload fails, by design.
+  draft-release:
+    needs: [build, provenance]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -85,18 +129,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: hashterm-deb
-      - name: Attach .deb to the release
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+          path: assets
+      - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" hashterm_*.deb --clobber --repo "$GITHUB_REPOSITORY"
-
-  provenance:
-    needs: [build]
-    permissions:
-      actions: read   # read the workflow path
-      id-token: write # sign the provenance
-      contents: write # attach provenance to the release
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      base64-subjects: ${{ needs.build.outputs.hashes }}
-      upload-assets: ${{ github.event_name == 'release' }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -l assets
+          pre=()
+          case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Re-run of the workflow: refresh the draft's assets.
+            gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" assets/* --draft --verify-tag --generate-notes \
+              "${pre[@]}" --title "hashterm ${TAG#v}" --repo "$GITHUB_REPOSITORY"
+          fi

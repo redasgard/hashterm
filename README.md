@@ -120,7 +120,17 @@ down (you can also just drag it).
 
 ## Install
 
-On Debian-family systems, build the package and install it:
+On Debian 13 (or anything with GTK ≥ 4.18 and VTE ≥ 0.80), download
+`hashterm_*_amd64.deb` from the [latest release](https://github.com/redasgard/hashterm/releases/latest)
+and install it:
+
+```sh
+sudo apt install ./hashterm_*_amd64.deb
+```
+
+Every release `.deb` is built by CI with signed SLSA provenance; see
+[docs/RELEASING.md](docs/RELEASING.md) to verify one. To build the package
+yourself instead:
 
 ```sh
 cargo build --release

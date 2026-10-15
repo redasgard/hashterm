@@ -24,7 +24,10 @@ pub fn run(config: Config, gtk_args: Vec<String>, startup_warning: Option<String
     // squatted the name first, it would harvest those. Refuse to forward when
     // the current owner is not our own binary.
     let sensitive = gtk_args.iter().any(|a| {
-        matches!(a.as_str(), "-e" | "--exec" | "--cwd" | "--restore" | "--config")
+        matches!(
+            a.as_str(),
+            "-e" | "--exec" | "--cwd" | "--restore" | "--config"
+        )
     });
     if sensitive && primary_is_trusted(&app_id()) == Some(false) {
         eprintln!(
@@ -196,10 +199,21 @@ fn ensure_window(
         });
     }
 
+    // Assembly dirs from crashed runs are garbage on disk; reclaim them.
+    hashterm_session::SessionStore::new(hashterm_session::SessionStore::default_root())
+        .sweep_stale();
     wire_event_bus(&win);
     wire_reconciler(&win);
     wire_config_reload(config, &win, &styles);
     wire_autosave(config, &win);
+    // GTK 4.22 retains freed heap (per-frame/per-rebuild allocations land in
+    // glibc arena free lists and are never trimmed back). Periodically hand
+    // the free tops back to the OS so RSS reflects live memory.
+    glib::timeout_add_seconds_local(60, || {
+        // SAFETY: malloc_trim(0) is thread-safe; called from the main loop.
+        unsafe { libc::malloc_trim(0) };
+        glib::ControlFlow::Continue
+    });
     wire_global_hotkey(&display, config, &win);
     sync_autostart(config.borrow().general.autostart);
 }

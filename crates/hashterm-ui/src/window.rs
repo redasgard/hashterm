@@ -129,6 +129,10 @@ pub struct MainWindow {
     /// instantly, the portal's D-Bus round-trip lands 200-400ms later) — it
     /// must be absorbed, or it re-raises the emptied window mid-animation.
     hiding: std::cell::Cell<bool>,
+    /// Set when the tab/group UI was refreshed while the window was unmapped;
+    /// GTK4 leaks ~390 kB per widget rebuild on an unmapped window, so hidden
+    /// refreshes only mark this and one rebuild runs at next map.
+    ui_dirty: std::cell::Cell<bool>,
     /// Whole-window opacity set live via Ctrl+Alt+Shift+scroll. Overrides
     /// appearance.window_opacity; an edit of that config value clears it.
     opacity_override: std::cell::Cell<Option<f64>>,
@@ -259,6 +263,7 @@ impl MainWindow {
             suppress_keyvals: RefCell::new(Vec::new()),
             tabbar_pinned: std::cell::Cell::new(false),
             hiding: std::cell::Cell::new(false),
+            ui_dirty: std::cell::Cell::new(false),
             opacity_override: std::cell::Cell::new(ui_state.window_opacity),
             opacity_save_timer: std::cell::Cell::new(None),
             osd_revealer,
@@ -368,6 +373,21 @@ impl MainWindow {
                     backend.keep_above(&app_win);
                 }
             });
+        }
+        // Refreshes that arrived while unmapped were deferred (rebuilds on an
+        // unmapped window leak); play the one pending rebuild now.
+        {
+            let this = Rc::downgrade(&this);
+            this.upgrade()
+                .expect("window alive while connecting map")
+                .window
+                .connect_map(move |_| {
+                    if let Some(w) = this.upgrade()
+                        && w.ui_dirty.take()
+                    {
+                        w.refresh_tabbar();
+                    }
+                });
         }
         this
     }
@@ -691,8 +711,7 @@ impl MainWindow {
     /// the chord is held.
     fn wire_opacity_scroll(self: &Rc<Self>) {
         use gtk4::gdk::ModifierType;
-        let scroll =
-            gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
+        let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
         scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let this = Rc::downgrade(self);
         scroll.connect_scroll(move |ctl, _dx, dy| {
@@ -975,7 +994,8 @@ impl MainWindow {
                     .append(&osd_neighbor_label(&title_of((i + n - k) % n), k));
             }
         }
-        self.osd_content.append(&osd_current_label(&title_of(i), i + 1, n));
+        self.osd_content
+            .append(&osd_current_label(&title_of(i), i + 1, n));
         for k in 1..=radius {
             if n > 1 {
                 self.osd_content
@@ -1310,12 +1330,7 @@ impl MainWindow {
         // A group exists iff it has members; never switch into a phantom
         // (stale state key, rename-merge race) — it would strand the UI with
         // an empty tab bar and no focused terminal.
-        if !self
-            .tabs
-            .borrow()
-            .iter()
-            .any(|t| t.group_name() == name)
-        {
+        if !self.tabs.borrow().iter().any(|t| t.group_name() == name) {
             return;
         }
         *self.active_group.borrow_mut() = name.to_owned();
@@ -1721,6 +1736,9 @@ impl MainWindow {
             if t.title_custom {
                 return; // user-pinned name: automatic titles don't apply
             }
+            if t.title == title {
+                return; // no change: skip the widget rebuild
+            }
             t.title = title;
         }
         self.refresh_tabbar();
@@ -1737,6 +1755,9 @@ impl MainWindow {
             .iter_mut()
             .find(|t| t.session == session)
         {
+            if t.badge == Some(badge) {
+                return; // no change: skip the widget rebuild
+            }
             t.badge = Some(badge);
         }
         self.refresh_tabbar();
@@ -2004,9 +2025,8 @@ impl MainWindow {
         // and arm the lock for this run — must happen once at startup.
         let unclean = hashterm_core::state::take_unclean_and_arm();
         if self.tabs.borrow().is_empty() {
-            let store = hashterm_session::SessionStore::new(
-                hashterm_session::SessionStore::default_root(),
-            );
+            let store =
+                hashterm_session::SessionStore::new(hashterm_session::SessionStore::default_root());
             let has_save = store.resolve("latest").is_some();
             let cfg = self.config.borrow().session.clone();
             if cfg.restore_on_start && has_save {
@@ -2048,7 +2068,10 @@ impl MainWindow {
     /// after an unclean exit. On Restore, the newest save is restored
     /// alongside the fresh scratch tab; on Start fresh, nothing happens.
     fn prompt_restore_previous(self: &Rc<Self>, store: &hashterm_session::SessionStore) {
-        let (count, when) = match store.resolve("latest").and_then(|(n, a)| store.load(&n, a).ok()) {
+        let (count, when) = match store
+            .resolve("latest")
+            .and_then(|(n, a)| store.load(&n, a).ok())
+        {
             Some((m, _)) => (
                 m.sessions.len(),
                 if m.created_local.is_empty() {
@@ -2110,6 +2133,13 @@ impl MainWindow {
     }
 
     fn refresh_tabbar(self: &Rc<Self>) {
+        // Rebuilding widgets on an unmapped window leaks ~390 kB per call in
+        // GTK 4.22 (and nothing is painted while hidden anyway): defer to the
+        // next map. map() runs one rebuild then.
+        if !self.window.is_mapped() {
+            self.ui_dirty.set(true);
+            return;
+        }
         let active = self.stack.visible_child_name().map(|s| s.to_string());
         let active_group = self.active_group.borrow().clone();
         let infos: Vec<TabInfo> = self
@@ -2316,7 +2346,6 @@ fn resolved_groupbar_edge(cfg: &Config) -> Edge {
         None => fallback,
     }
 }
-
 
 #[cfg(test)]
 mod tests {

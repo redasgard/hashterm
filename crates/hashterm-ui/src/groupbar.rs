@@ -100,6 +100,14 @@ impl GroupBar {
     }
 
     pub fn set_groups(self: &Rc<Self>, groups: Vec<GroupInfo>, active: String, show_counts: bool) {
+        // Skip the widget churn when nothing changed (rebuilds are expensive
+        // and leak per call on GTK 4.22).
+        if *self.groups.borrow() == groups
+            && *self.active.borrow() == active
+            && self.show_counts.get() == show_counts
+        {
+            return;
+        }
         *self.groups.borrow_mut() = groups;
         *self.active.borrow_mut() = active;
         self.show_counts.set(show_counts);
@@ -287,10 +295,8 @@ impl GroupBar {
             });
         }
         {
-            let drop = gtk4::DropTarget::new(
-                gtk4::glib::types::Type::STRING,
-                gtk4::gdk::DragAction::MOVE,
-            );
+            let drop =
+                gtk4::DropTarget::new(gtk4::glib::types::Type::STRING, gtk4::gdk::DragAction::MOVE);
             let this = Rc::downgrade(self);
             let target = plus.clone();
             drop.connect_drop(move |_, value, _, _| {

@@ -223,6 +223,15 @@ impl TabBar {
         groups: Vec<GroupInfo>,
         active_group: String,
     ) {
+        // Rebuilding is expensive AND (GTK 4.22) leaks per rebuild: skip when
+        // nothing actually changed — the common case for repeated events.
+        if *self.tabs.borrow() == tabs
+            && *self.active.borrow() == active
+            && *self.groups.borrow() == groups
+            && *self.active_group.borrow() == active_group
+        {
+            return;
+        }
         *self.tabs.borrow_mut() = tabs;
         *self.active.borrow_mut() = active;
         *self.groups.borrow_mut() = groups;
@@ -553,13 +562,15 @@ pub(crate) fn wire_window_drag(target: &impl IsA<gtk4::Widget>) {
         };
         let over_button = widget
             .pick(sx, sy, gtk4::PickFlags::DEFAULT)
-            .map(|mut w| loop {
-                if w.is::<gtk4::Button>() {
-                    break true;
-                }
-                match w.parent() {
-                    Some(p) => w = p,
-                    None => break false,
+            .map(|mut w| {
+                loop {
+                    if w.is::<gtk4::Button>() {
+                        break true;
+                    }
+                    match w.parent() {
+                        Some(p) => w = p,
+                        None => break false,
+                    }
                 }
             })
             .unwrap_or(false);
@@ -568,7 +579,9 @@ pub(crate) fn wire_window_drag(target: &impl IsA<gtk4::Widget>) {
             return;
         }
         let Some(root) = widget.root() else { return };
-        let Some(surface) = root.surface() else { return };
+        let Some(surface) = root.surface() else {
+            return;
+        };
         let Ok(toplevel) = surface.downcast::<gtk4::gdk::Toplevel>() else {
             return;
         };

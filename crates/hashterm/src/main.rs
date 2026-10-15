@@ -85,6 +85,29 @@ enum Cmd {
 }
 
 fn main() -> std::process::ExitCode {
+    // GTK 4.22 GPU renderers (NGL/GL on Mesa 26 + AMD/XWayland) retain ~350 kB
+    // per rendered frame (gsk_renderer_render); with the bundled tmux conf
+    // set-titles on, every pane-title change redraws each attached client, so
+    // an active session leaks GBs per day. Disabling GSK's occlusion culling
+    // plugs the leak while keeping hardware rendering; cairo (fully leak-free
+    // but software-drawn) is the fallback if occlusion still leaks. Explicit
+    // user env vars win.
+    if std::env::var_os("GSK_RENDERER").is_none() && std::env::var_os("GSK_GPU_DISABLE").is_none() {
+        // Re-exec rather than set_var(): GTK must see the variables in the
+        // exec environment (an in-process setenv is silently ignored by the
+        // renderer selector in this GTK build).
+        unsafe {
+            std::env::set_var("GSK_GPU_DISABLE", "occlusion");
+        }
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().unwrap_or_else(|_| "/usr/bin/hashterm".into());
+        let err = std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .env("GSK_GPU_DISABLE", "occlusion")
+            .exec();
+        // exec() never returns; reaching this means it failed.
+        eprintln!("hashterm: re-exec failed: {err}");
+    }
     let cli = Cli::parse();
 
     // restore-pane runs inside a pane pty: no logging setup, no config, exec ASAP.

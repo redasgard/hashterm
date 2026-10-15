@@ -64,6 +64,42 @@ pub enum StoreError {
     TooLarge { name: String, what: &'static str },
 }
 
+/// Remove assembly dirs left behind by crashed runs: `.tmp.<name>.<pid>` and
+/// `.old.<name>.<pid>`. Stale means the embedded PID no longer exists; dirs
+/// from a live PID (another instance mid-save, or ours) are left alone. PID
+/// reuse can make a stale dir survive one cycle — harmless.
+fn sweep_stale_dirs(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name
+            .strip_prefix(".tmp.")
+            .or_else(|| name.strip_prefix(".old."))
+        else {
+            continue;
+        };
+        let Some((_, pid_str)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<libc::pid_t>() else {
+            continue;
+        };
+        if pid == std::process::id() as libc::pid_t {
+            continue;
+        }
+        // ESRCH -> dead; EPERM -> alive but hidden from us: never delete.
+        let alive = unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if alive {
+            continue;
+        }
+        let _ = fs::remove_dir_all(entry.path());
+    }
+}
+
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
     move |source| StoreError::Io {
         path: path.into(),
@@ -124,6 +160,9 @@ impl SessionStore {
         // without following a symlink planted at either path.
         harden_existing_dir(&self.root);
         harden_existing_dir(&parent);
+        // A crashed run leaves `.tmp.*`/`.old.*` dirs behind; every begin is
+        // a free opportunity to sweep them.
+        sweep_stale_dirs(&parent);
         let tmp = parent.join(format!(".tmp.{}.{}", name, std::process::id()));
         if tmp.exists() {
             fs::remove_dir_all(&tmp).map_err(io_err(&tmp))?;
@@ -216,8 +255,7 @@ impl SessionStore {
             });
         }
         for s in &manifest.sessions {
-            if s.windows.len() > MAX_WINDOWS
-                || s.windows.iter().any(|w| w.panes.len() > MAX_PANES)
+            if s.windows.len() > MAX_WINDOWS || s.windows.iter().any(|w| w.panes.len() > MAX_PANES)
             {
                 return Err(StoreError::TooLarge {
                     name: name.into(),
@@ -258,7 +296,9 @@ impl SessionStore {
                 }
             }
         }
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // Newest first. created_at can tie (same-second saves); the directory
+        // name is a sortable timestamp and breaks the tie deterministically.
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.name.cmp(&a.name)));
         Ok(out)
     }
 
@@ -290,6 +330,15 @@ impl SessionStore {
             return Some((name.to_owned(), true));
         }
         None
+    }
+
+    /// Drop assembly dirs (`.tmp.*`/`.old.*`) left by crashed runs under
+    /// both save roots. Called at GUI startup and opportunistically by
+    /// `begin`.
+    pub fn sweep_stale(&self) {
+        for sub in ["sessions", "autosave"] {
+            sweep_stale_dirs(&self.root.join(sub));
+        }
     }
 
     /// Keep the newest `keep` autosaves (by directory name, which is a
@@ -392,6 +441,24 @@ mod tests {
             .collect();
         assert_eq!(autos.len(), 2);
         assert_eq!(autos[0].name, "2026-08-14T10-00-04");
+    }
+
+    #[test]
+    fn sweep_removes_stale_tmp_dirs() {
+        let store = scratch();
+        let autosave = store.root.join("autosave");
+        std::fs::create_dir_all(autosave.join(".tmp.work.999999999")).unwrap();
+        std::fs::create_dir_all(autosave.join(".old.work.999999999")).unwrap();
+        // Live-PID dirs (ours) must survive.
+        let ours = format!(".tmp.work.{}", std::process::id());
+        std::fs::create_dir_all(autosave.join(&ours)).unwrap();
+        // Not-a-pid garbage must not panic or remove unrelated dirs.
+        std::fs::create_dir_all(autosave.join(".tmp.garbage")).unwrap();
+        store.sweep_stale();
+        assert!(!autosave.join(".tmp.work.999999999").exists());
+        assert!(!autosave.join(".old.work.999999999").exists());
+        assert!(autosave.join(&ours).exists());
+        assert!(autosave.join(".tmp.garbage").exists());
     }
 
     #[test]

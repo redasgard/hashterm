@@ -34,7 +34,7 @@ the window.
 | --- | --- |
 | General | new-tab directory, close behavior, confirm-before-close, start hidden, autostart |
 | Appearance | font, colors, padding, terminal / tab bar / window opacity, accent ring width |
-| Tabs and groups | tab bar edge, auto-hide, side style, close buttons, switch popup; group bar edge, counts, reordering |
+| Tabs and groups | tab bar edge, auto-hide, close buttons, switch popup; group bar edge, counts, reordering |
 | Window | drop-down edge, size, animation, hide on focus loss, remember size and position, layer-shell options |
 | Sessions | autosave interval and retention, scrollback, restore prompts, tmux window keys |
 | Keyboard | every global and in-app shortcut (invalid shortcuts are flagged and not saved) |

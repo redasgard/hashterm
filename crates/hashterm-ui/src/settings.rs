@@ -124,13 +124,6 @@ const PAGES: &[Page] = &[
                         "Off: the session keeps running detached and comes back as a tab next start.",
                         Kind::Bool
                     ),
-                    f!(
-                        "general",
-                        "confirm_close_running",
-                        "Ask before closing a busy tab",
-                        "When a program is running in the foreground.",
-                        Kind::Bool
-                    ),
                 ],
             },
             Group {
@@ -261,13 +254,6 @@ const PAGES: &[Page] = &[
                         "Hide until I point at the edge",
                         "The bar slides in over the terminal. Ctrl+Shift+B toggles it.",
                         Kind::Bool
-                    ),
-                    f!(
-                        "tabbar",
-                        "side_style",
-                        "Style on the left and right",
-                        "",
-                        Kind::Choice(&[("cards", "Title cards"), ("compact", "Compact rail")])
                     ),
                     f!(
                         "tabbar",

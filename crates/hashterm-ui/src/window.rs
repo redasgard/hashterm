@@ -718,7 +718,8 @@ impl MainWindow {
             return;
         }
         if self.window.is_visible() {
-            if !self.window.is_active() {
+            // `focus-loss` IS the unfocused case: it must hide, never refocus.
+            if !self.window.is_active() && source != "focus-loss" {
                 // Visible but unfocused: the hotkey means "bring it to me",
                 // not "hide it" — focus the console instead.
                 tracing::debug!("toggle[{source}]: focusing visible unfocused window");
@@ -1074,7 +1075,7 @@ impl MainWindow {
                 || !dd.hide_on_focus_loss
                 || !w.is_visible()
                 || !win.held_focus.get()
-                || win.modal_open.get()
+                || win.own_dialog_open()
             {
                 return;
             }
@@ -1084,12 +1085,24 @@ impl MainWindow {
                 if !win.window.is_active()
                     && win.window.is_visible()
                     && win.held_focus.get()
-                    && !win.modal_open.get()
+                    && !win.own_dialog_open()
                 {
                     win.toggle_dropdown_from("focus-loss");
                 }
             });
         });
+    }
+
+    /// One of this app's own dialogs (Settings, a confirmation, Properties…)
+    /// is on screen. Focus moving to it is not "the user left", so the console
+    /// must not hide from behind it.
+    fn own_dialog_open(&self) -> bool {
+        let main = self.window.upcast_ref::<gtk4::Window>();
+        self.modal_open.get()
+            || gtk4::Window::list_toplevels()
+                .iter()
+                .filter_map(|w| w.downcast_ref::<gtk4::Window>())
+                .any(|w| w != main && w.is_visible())
     }
 
     pub fn close_tab(self: &Rc<Self>, session: &str) {

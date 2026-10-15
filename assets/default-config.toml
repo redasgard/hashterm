@@ -13,7 +13,8 @@
 # Closing a tab kills its tmux session. false = the session keeps running
 # detached on the server and re-appears as a tab on next start.
 close_kills_session = true
-# Ask before closing a tab whose pane has a foreground process running.
+# Reserved, not implemented yet: tabs close immediately. Kept so existing
+# config files keep loading.
 confirm_close_running = true
 # New tabs start in the directory of the active tab.
 inherit_cwd = true
@@ -51,7 +52,8 @@ edge = "top"
 auto_hide = false
 # Reveal/conceal animation duration (ms).
 reveal_ms = 180
-# Left/right edges: "cards" (180px title cards) or "compact" (narrow rail).
+# Reserved, not implemented yet: left/right bars always draw title cards.
+# Kept so existing config files keep loading.
 side_style = "cards"
 show_close = true
 # Keep the bar revealed while a tab has a bell/activity badge.

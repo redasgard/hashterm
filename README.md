@@ -56,6 +56,13 @@ cargo build --release
   `Ctrl+Alt+Shift`+scroll live window transparency (remembered across
   restarts), clipboard bridged into tmux copy-mode.
 
+### In motion
+
+Switching tabs (the dial), then hopping between groups — each group has its own
+color, tab strip and terminals.
+
+![hashterm in use: tab switches with the dial, then group switches](docs/screenshots/demo.gif)
+
 ### The tab matrix
 
 Groups run along one edge, the active group's terminals along the perpendicular

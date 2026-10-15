@@ -8,7 +8,7 @@ attaches. Kill the window, crash it, `kill -9` it: your shells, scrollback and
 running programs keep going, and the next launch re-adopts them exactly where
 they were.
 
-![hashterm — frameless quake console with per-tab accent rings](docs/screenshots/hero.png)
+![hashterm — frameless quake console: group rows on the left, tabs along the top, colored rings around the terminal](docs/screenshots/hero.png)
 
 ## Features
 
@@ -48,7 +48,7 @@ Groups run along one edge, the active group's terminals along the perpendicular
 one. Each group has a color, drawn as a ring around the terminal; drop a tab on
 a group to move it, or on `+` for a new one.
 
-![The tab matrix — group bar on the left, terminals on top, colored group ring](docs/screenshots/matrix.png)
+![The tab matrix — groups on the left with colored dots, the active group's tabs along the top, a colored ring around the terminal](docs/screenshots/matrix.png)
 
 ### The switch dial
 
@@ -56,6 +56,15 @@ Switching tabs shows a wheel: the current tab bright in the center, neighbors
 receding above and below.
 
 ![Tab-switch dial OSD](docs/screenshots/dial.png)
+
+### Organizing tabs and groups
+
+Right-click a tab to rename it, change its accent color, move it to another
+group or close it. Right-click a group to rename it, color it, or move it up and
+down (you can also just drag it).
+
+![Tab context menu](docs/screenshots/menu-tab.png)
+![Group context menu](docs/screenshots/menu-group.png)
 
 ## Install
 

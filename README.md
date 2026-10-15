@@ -57,6 +57,17 @@ receding above and below.
 
 ![Tab-switch dial OSD](docs/screenshots/dial.png)
 
+### Auto-hiding tab bar
+
+With `tabbar.auto_hide = true` the bar stays out of the way: it is concealed
+until the pointer touches its edge, then slides in **over** the terminal, so
+revealing it never reflows the panes. Below, `tabbar.edge = "left"` — first
+hidden, then revealed (the terminal text does not move). `Ctrl+Shift+B` toggles
+it from the keyboard.
+
+![Left tab bar hidden](docs/screenshots/autohide-hidden.png)
+![Left tab bar revealed as a floating overlay](docs/screenshots/autohide-floating.png)
+
 ### Organizing tabs and groups
 
 Right-click a tab to rename it, change its accent color, move it to another

@@ -74,7 +74,7 @@ Priority: optional
 Architecture: $arch
 Installed-Size: $size
 Maintainer: Red Asgard <yevhen@redasgard.com>
-Depends: libgtk-4-1 (>= 4.18), libvte-2.91-gtk4-0 (>= 0.84), libgtk4-layer-shell0, libglib2.0-0t64 (>= 2.80), tmux
+Depends: libgtk-4-1 (>= 4.18), libvte-2.91-gtk4-0 (>= 0.80), libgtk4-layer-shell0, libglib2.0-0t64 (>= 2.80), tmux
 Recommends: xdg-desktop-portal, xclip | wl-clipboard | xsel
 Description: tmux-native terminal with saved sessions and quake drop-down
  Frameless tabbed GTK4/VTE terminal. Every tab is a session on a dedicated

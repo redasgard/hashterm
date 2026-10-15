@@ -10,6 +10,17 @@ they were.
 
 ![hashterm — frameless quake console: group rows on the left, tabs along the top, colored rings around the terminal](docs/screenshots/hero.png)
 
+## Quick start
+
+```sh
+sudo apt install libgtk-4-dev libvte-2.91-gtk4-dev libgtk4-layer-shell-dev tmux
+cargo build --release
+./target/release/hashterm     # then press F12 to drop the console down
+```
+
+`Ctrl+Shift+T` opens a tab, `Ctrl+,` opens Settings. Prefer a package? See
+[Install](#install).
+
 ## Features
 
 - **Quake-style drop-down** — a global hotkey (default `F12`) slides the
@@ -34,9 +45,12 @@ they were.
   pre-type everything else at the prompt so a single `Enter` re-runs it.
   Autosaves rotate on a timer and on exit; named saves never expire.
   `sudo`/`ssh-add`-class commands are never replayed.
-- **Config as a file, not a dialog** — `~/.config/hashterm/config.toml`,
-  fully commented, live-reloaded on save. Hotkey conflicts are detected and
-  surfaced on-screen instead of silently picking a winner.
+- **Settings window *and* a plain config file** — `Ctrl+,` opens a Settings
+  window with live preview; it edits `~/.config/hashterm/config.toml` in place
+  (your comments survive), and the file stays fully commented and
+  live-reloaded on save, so you can still hand-edit or keep it in your
+  dotfiles. Hotkey conflicts are detected and surfaced on-screen instead of
+  silently picking a winner.
 - **Small touches** — per-tab names and accent colors, switch OSD toasts,
   auto-hiding tab bar on any edge, separate terminal/tab-bar/window opacity,
   `Ctrl+Alt+Shift`+scroll live window transparency (remembered across
@@ -68,6 +82,14 @@ it from the keyboard.
 ![Left tab bar hidden](docs/screenshots/autohide-hidden.png)
 ![Left tab bar revealed as a floating overlay](docs/screenshots/autohide-floating.png)
 
+### Settings
+
+`Ctrl+,` opens a Settings window. It applies changes live and edits
+`config.toml` in place, keeping your comments, so the file remains the single
+source of truth. Details: [docs/settings.md](docs/settings.md).
+
+![Settings — Appearance](docs/screenshots/settings-appearance.png)
+
 ### Organizing tabs and groups
 
 Right-click a tab to rename it, change its accent color, move it to another
@@ -87,7 +109,7 @@ cargo build --release
 sudo apt install ./dist/hashterm_*.deb
 ```
 
-Runtime dependencies: GTK 4 (≥ 4.18), VTE4 (≥ 0.84), gtk4-layer-shell, tmux.
+Runtime dependencies: GTK 4 (≥ 4.18), VTE4 (≥ 0.80), gtk4-layer-shell, tmux.
 
 ### Building from source
 
@@ -108,6 +130,8 @@ cargo build --release          # needs Rust 1.90+
 | `Alt+1..0` | jump to tab 1–10 |
 | `Ctrl+Shift+B` | show/hide the tab bar |
 | `Ctrl+Shift+S` | session picker (save / restore) |
+| `Ctrl+,` | Settings window |
+| `Ctrl+Shift+,` | open `config.toml` in your editor |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste |
 | `Ctrl+Alt+Shift` + scroll | window opacity |
 | mouse wheel over the tab bar | previous / next tab in the group |

@@ -2690,6 +2690,11 @@ impl MainWindow {
         }
     }
 
+    /// The live configuration (shared with the config watcher).
+    pub fn config(&self) -> Rc<RefCell<Config>> {
+        self.config.clone()
+    }
+
     pub fn gtk_window(&self) -> &gtk4::ApplicationWindow {
         &self.window
     }

@@ -137,9 +137,12 @@ session_picker = "<Ctrl><Shift>s"
 copy = "<Ctrl><Shift>c"
 # Shift+Insert always pastes too.
 paste = "<Ctrl><Shift>v"
+# The Settings window: every option on this page with live preview. It edits
+# this file in place (your comments are kept).
+settings = "<Ctrl>comma"
 # Opens THIS file in your default editor (also in the tab bar's right-click
 # menu). Changes apply live on save.
-open_config = "<Ctrl>comma"
+open_config = "<Ctrl><Shift>comma"
 # Jump straight to a tab: <mod>+1..9, <mod>+0 = tab 10. "" disables (frees
 # Alt+digits for terminal apps).
 goto_tab_modifier = "<Alt>"

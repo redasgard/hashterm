@@ -141,6 +141,7 @@ impl TabBar {
             let model = gtk4::gio::Menu::new();
             model.append(Some("New Tab"), Some("app.new-tab"));
             model.append(Some("Sessions…"), Some("app.sessions"));
+            model.append(Some("Settings…"), Some("app.settings"));
             model.append(Some("Open Configuration"), Some("app.open-config"));
             model.append(Some("Hide Tab Bar"), Some("app.toggle-tabbar"));
             let popover = gtk4::PopoverMenu::from_model(Some(&model));

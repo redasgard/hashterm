@@ -286,6 +286,9 @@ pub struct Hotkeys {
     pub prev_tab: String,
     pub toggle_tabbar: String,
     pub session_picker: String,
+    /// Open the Settings window.
+    pub settings: String,
+    /// Open config.toml in your editor.
     pub open_config: String,
     /// Copy the terminal selection to the clipboard.
     pub copy: String,
@@ -309,7 +312,8 @@ impl Default for Hotkeys {
             prev_tab: "<Ctrl>Home".into(),
             toggle_tabbar: "<Ctrl><Shift>b".into(),
             session_picker: "<Ctrl><Shift>s".into(),
-            open_config: "<Ctrl>comma".into(),
+            settings: "<Ctrl>comma".into(),
+            open_config: "<Ctrl><Shift>comma".into(),
             copy: "<Ctrl><Shift>c".into(),
             paste: "<Ctrl><Shift>v".into(),
             goto_tab_modifier: "<Alt>".into(),

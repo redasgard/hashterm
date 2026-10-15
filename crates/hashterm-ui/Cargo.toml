@@ -16,4 +16,5 @@ hashterm-platform = { workspace = true }
 gtk4 = { workspace = true }
 vte4 = { workspace = true }
 tracing = { workspace = true }
+toml = { workspace = true }
 async-channel = { workspace = true }

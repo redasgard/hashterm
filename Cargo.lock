@@ -947,6 +947,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1016,6 +1017,7 @@ dependencies = [
  "hashterm-session",
  "hashterm-tmux",
  "libc",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "vte4",
 ]
@@ -1640,6 +1642,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

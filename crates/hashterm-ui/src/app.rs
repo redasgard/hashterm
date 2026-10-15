@@ -411,7 +411,7 @@ fn build_controller(config: &Config) -> std::io::Result<TmuxController> {
 type WindowAction = Box<dyn Fn(&Rc<MainWindow>)>;
 
 fn register_actions(app: &gtk4::Application, window: &Rc<RefCell<Option<Rc<MainWindow>>>>) {
-    let acts: [(&str, WindowAction); 12] = [
+    let acts: [(&str, WindowAction); 13] = [
         ("new-tab", Box::new(|w| w.new_tab())),
         ("close-tab", Box::new(|w| w.close_active_tab())),
         ("next-tab", Box::new(|w| w.cycle_tab(true))),
@@ -422,6 +422,7 @@ fn register_actions(app: &gtk4::Application, window: &Rc<RefCell<Option<Rc<MainW
             Box::new(|w| w.toggle_dropdown_from("action")),
         ),
         ("sessions", Box::new(crate::picker::open)),
+        ("settings", Box::new(crate::settings::open)),
         ("open-config", Box::new(open_config_file)),
         ("copy", Box::new(|w| w.copy_selection())),
         ("paste", Box::new(|w| w.paste_clipboard())),
@@ -452,6 +453,7 @@ fn apply_accels(app: &gtk4::Application, config: &Config) -> Option<String> {
         ("app.prev-tab", &hk.prev_tab),
         ("app.toggle-tabbar", &hk.toggle_tabbar),
         ("app.sessions", &hk.session_picker),
+        ("app.settings", &hk.settings),
         ("app.open-config", &hk.open_config),
         ("app.copy", &hk.copy),
         ("app.paste", &hk.paste),
@@ -492,9 +494,10 @@ fn apply_accels(app: &gtk4::Application, config: &Config) -> Option<String> {
     conflict
 }
 
-/// The config file IS the settings dialog (live-reloaded on save): open it in
-/// the user's default editor.
-fn open_config_file(win: &Rc<MainWindow>) {
+/// Open config.toml itself in the user's default editor (live-reloaded on
+/// save). The Settings window covers the common options; this is the escape
+/// hatch for the rest.
+pub(crate) fn open_config_file(win: &Rc<MainWindow>) {
     // Guarantee there is a (commented) file to open.
     let _ = Config::install_default_file();
     let uri = format!("file://{}", Config::default_path().display());

@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod ipc;
+pub mod settings;
 pub mod state;
 
 pub const APP_ID: &str = "com.redasgard.Hashterm";

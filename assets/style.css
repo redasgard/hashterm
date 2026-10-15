@@ -135,3 +135,30 @@ window.hashterm.dropdown.edge-right .console-body {
 .tab.external {
   color: #98c379;
 }
+
+/* ---- Settings window ---------------------------------------------------- */
+.settings-list {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid alpha(currentColor, 0.14);
+  background-color: alpha(currentColor, 0.04);
+}
+.settings-row {
+  padding: 10px 14px;
+  min-height: 34px;
+}
+.settings-restart {
+  color: #e5a64a;
+}
+.settings-status.error {
+  color: #ff6b6b;
+}
+.settings-window entry.error {
+  border-color: #ff6b6b;
+}
+.settings-window .dim-label {
+  opacity: 0.8;
+}
+.settings-list row + row {
+  border-top: 1px solid alpha(currentColor, 0.1);
+}

@@ -58,10 +58,15 @@ cargo build --release
 
 ### In motion
 
-Switching tabs (the dial), then hopping between groups — each group has its own
-color, tab strip and terminals.
+The console drops from the top edge, the mouse wheel over the tab bar scrolls
+through tabs (the dial shows where you are), and `Ctrl+PgDn/PgUp` hops between
+groups — each with its own color, tab strip and terminals.
 
-![hashterm in use: tab switches with the dial, then group switches](docs/screenshots/demo.gif)
+![hashterm in use: the console slides down, scrolling through tabs, switching groups, sliding away](docs/screenshots/demo.gif)
+
+<sub>The slide-in and slide-out frames in this clip are re-created from real
+captured frames (same ease-out motion, wallpaper behind); the headless capture
+server has no compositor to record the app's own transparent slide.</sub>
 
 ### The tab matrix
 

@@ -584,6 +584,7 @@ fn wire_config_reload(config: &Rc<RefCell<Config>>, win: &Rc<MainWindow>, styles
                 if geometry_changed {
                     let mut st = hashterm_core::state::UiState::load();
                     st.window_height_px = None;
+                    st.window_geometry = None;
                     st.save();
                 }
                 if let Some(w) = win.upgrade() {

@@ -4,6 +4,7 @@
 
 use gtk4::prelude::*;
 use hashterm_core::config::{Config, Edge};
+use hashterm_core::state::WindowGeometry;
 use hashterm_tmux::TmuxController;
 use hashterm_tmux::controller::NewSessionOpts;
 use std::cell::RefCell;
@@ -133,6 +134,12 @@ pub struct MainWindow {
     /// GTK4 leaks ~390 kB per widget rebuild on an unmapped window, so hidden
     /// refreshes only mark this and one rebuild runs at next map.
     ui_dirty: std::cell::Cell<bool>,
+    /// Geometry-memory poller state: the last settled geometry since the
+    /// window was mapped (None until one settles) and the previous sample.
+    /// A change is persisted only once two consecutive samples agree, so a
+    /// drag or resize in progress is not written on every tick.
+    geometry_settled: std::cell::Cell<Option<WindowGeometry>>,
+    geometry_pending: std::cell::Cell<Option<WindowGeometry>>,
     /// Whole-window opacity set live via Ctrl+Alt+Shift+scroll. Overrides
     /// appearance.window_opacity; an edit of that config value clears it.
     opacity_override: std::cell::Cell<Option<f64>>,
@@ -169,6 +176,19 @@ impl MainWindow {
             .decorated(false)
             .build();
         window.add_css_class("hashterm");
+
+        // Plain-window mode has no dropdown placement to carry the remembered
+        // size, so apply it as the initial size here (position follows in
+        // initial_present, once the window is realized).
+        if !config.borrow().dropdown.enabled
+            && config.borrow().window.remember_size
+            && let Some(g) = hashterm_core::state::UiState::load().window_geometry
+            && let (Some(w), Some(h)) = (g.width, g.height)
+            && w > 0
+            && h > 0
+        {
+            window.set_default_size(w, h);
+        }
 
         // Layer-shell must claim the window BEFORE it is first realized.
         if config.borrow().dropdown.enabled
@@ -264,6 +284,8 @@ impl MainWindow {
             tabbar_pinned: std::cell::Cell::new(false),
             hiding: std::cell::Cell::new(false),
             ui_dirty: std::cell::Cell::new(false),
+            geometry_settled: std::cell::Cell::new(None),
+            geometry_pending: std::cell::Cell::new(None),
             opacity_override: std::cell::Cell::new(ui_state.window_opacity),
             opacity_save_timer: std::cell::Cell::new(None),
             osd_revealer,
@@ -361,6 +383,8 @@ impl MainWindow {
         this.wire_focus_loss();
         this.wire_quit_autosave();
         this.wire_signal_snapshot();
+        this.wire_geometry_memory();
+        this.wire_redraw_on_resize();
         this.refresh_toggle_shortcut();
         this.adopt_or_create();
 
@@ -514,15 +538,10 @@ impl MainWindow {
 
     fn wire_quit_autosave(self: &Rc<Self>) {
         let this = Rc::downgrade(self);
-        self.window.connect_close_request(move |w| {
+        self.window.connect_close_request(move |_| {
             if let Some(win) = this.upgrade() {
-                // Remember the height for next start.
-                let h = w.height();
-                if h > 0 {
-                    let mut st = hashterm_core::state::UiState::load();
-                    st.window_height_px = Some(h);
-                    st.save();
-                }
+                // Remember the geometry for next start.
+                win.flush_geometry();
                 win.snapshot_now();
             }
             // Clean exit: clear the crash marker so next start doesn't offer
@@ -551,7 +570,7 @@ impl MainWindow {
             if SHUTDOWN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 if let Some(win) = this.upgrade() {
                     tracing::info!("shutdown signal: snapshotting before exit");
-                    win.persist_height();
+                    win.flush_geometry();
                     win.snapshot_now();
                     // Deliberately DO NOT clear the unclean marker: a reboot or
                     // logout is not a user quit, so the next start should offer
@@ -753,18 +772,190 @@ impl MainWindow {
         self.window.add_controller(scroll);
     }
 
-    /// Remember the current height so the next start (or show) restores it.
-    fn persist_height(&self) {
-        let h = self.window.height();
-        if h > 0 {
-            let mut st = hashterm_core::state::UiState::load();
-            st.window_height_px = Some(h);
-            st.save();
+    /// What the user has chosen to be remembered, as it is right now. None
+    /// while the window can't be measured meaningfully (hidden, maximized,
+    /// fullscreen) or when nothing is enabled. Position comes from the
+    /// platform backend and is absent where the platform can't report it.
+    fn current_geometry(&self) -> Option<WindowGeometry> {
+        let cfg = self.config.borrow().window.clone();
+        if !self.window.is_mapped() || self.window.is_maximized() || self.window.is_fullscreen() {
+            return None;
         }
+        let mut g = WindowGeometry::default();
+        if cfg.remember_size {
+            let (w, h) = (self.window.width(), self.window.height());
+            if w > 0 && h > 0 {
+                g.width = Some(w);
+                g.height = Some(h);
+            }
+        }
+        if cfg.remember_position
+            && let Some((x, y)) = self.backend.position(&self.window)
+        {
+            g.x = Some(x);
+            g.y = Some(y);
+        }
+        (g != WindowGeometry::default()).then_some(g)
+    }
+
+    /// The remembered geometry filtered through the current config: parts the
+    /// user turned off are dropped, and an explicit `dropdown.height` still
+    /// beats a remembered height. Falls back to the pre-geometry height key.
+    fn saved_geometry(&self) -> Option<WindowGeometry> {
+        let cfg = self.config.borrow();
+        let st = hashterm_core::state::UiState::load();
+        let mut g = st.window_geometry.unwrap_or_default();
+        if !cfg.window.remember_size {
+            g.width = None;
+            g.height = None;
+        } else if g.height.is_none() {
+            g.height = st.window_height_px;
+        }
+        if !cfg.window.remember_position {
+            g.x = None;
+            g.y = None;
+        }
+        if cfg.dropdown.height.is_some() {
+            g.height = None;
+        }
+        (g != WindowGeometry::default()).then_some(g)
+    }
+
+    /// Hand the remembered geometry to the overlay backend ahead of a
+    /// `place_and_show`.
+    fn sync_saved_geometry(&self) {
+        self.backend.set_saved_geometry(if self.config.borrow().dropdown.enabled {
+            self.saved_geometry()
+        } else {
+            None
+        });
+    }
+
+    fn store_geometry(&self, g: WindowGeometry) {
+        let mut st = hashterm_core::state::UiState::load();
+        let mut merged = st.window_geometry.unwrap_or_default();
+        merged.x = g.x.or(merged.x);
+        merged.y = g.y.or(merged.y);
+        merged.width = g.width.or(merged.width);
+        merged.height = g.height.or(merged.height);
+        st.window_geometry = Some(merged);
+        st.save();
+    }
+
+    /// Persist the geometry if it changed since the window was shown. Called
+    /// right before the window goes away (hide / close / shutdown), when the
+    /// poller may not have seen the last change yet.
+    fn flush_geometry(&self) {
+        if let (Some(settled), Some(cur)) = (self.geometry_settled.get(), self.current_geometry())
+            && settled != cur
+        {
+            self.store_geometry(cur);
+        }
+        self.geometry_settled.set(None);
+        self.geometry_pending.set(None);
+    }
+
+    /// Remember size/position when the user moves or resizes the window.
+    /// GTK has no move notification and Wayland has no position at all, so a
+    /// cheap 700 ms sampler watches the mapped window; a change is saved once
+    /// it holds still for two samples. The first settled sample after a map is
+    /// only the baseline (placement by the app itself is never "the user's").
+    fn wire_geometry_memory(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        self.window.connect_map(move |_| {
+            if let Some(w) = this.upgrade() {
+                w.geometry_settled.set(None);
+                w.geometry_pending.set(None);
+            }
+        });
+        let this = Rc::downgrade(self);
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(700), move || {
+            let Some(win) = this.upgrade() else {
+                return gtk4::glib::ControlFlow::Break;
+            };
+            if win.hiding.get() {
+                return gtk4::glib::ControlFlow::Continue;
+            }
+            let Some(cur) = win.current_geometry() else {
+                win.geometry_pending.set(None);
+                return gtk4::glib::ControlFlow::Continue;
+            };
+            if win.geometry_pending.get() == Some(cur) {
+                match win.geometry_settled.get() {
+                    Some(prev) if prev != cur => win.store_geometry(cur),
+                    _ => {}
+                }
+                win.geometry_settled.set(Some(cur));
+            }
+            win.geometry_pending.set(Some(cur));
+            gtk4::glib::ControlFlow::Continue
+        });
+    }
+
+    /// Redraw the terminal once a resize settles. VTE tells tmux the new size
+    /// (SIGWINCH) as the window changes, but a drag fires many intermediate
+    /// sizes and the final repaint can be missed or leave stale cells. When
+    /// the surface stops changing for 150 ms: repaint the visible terminal and
+    /// ask its tmux client to redraw at the final size.
+    fn wire_redraw_on_resize(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        let timer: Rc<std::cell::Cell<Option<gtk4::glib::SourceId>>> =
+            Rc::new(std::cell::Cell::new(None));
+        self.window.connect_realize(move |w| {
+            let Some(surface) = w.surface() else { return };
+            let this = this.clone();
+            let timer = timer.clone();
+            // Only a real size change counts: layout also fires for repaints
+            // we cause ourselves, which must not re-arm the redraw.
+            let last = std::cell::Cell::new((0, 0));
+            surface.connect_layout(move |_, w, h| {
+                if last.replace((w, h)) == (w, h) {
+                    return;
+                }
+                if let Some(id) = timer.take() {
+                    id.remove();
+                }
+                let this = this.clone();
+                let timer2 = timer.clone();
+                let id = gtk4::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(150),
+                    move || {
+                        timer2.set(None);
+                        if let Some(win) = this.upgrade() {
+                            win.redraw_visible_terminal();
+                        }
+                    },
+                );
+                timer.set(Some(id));
+            });
+        });
+    }
+
+    fn redraw_visible_terminal(&self) {
+        let Some(name) = self.stack.visible_child_name() else {
+            return;
+        };
+        let name = name.to_string();
+        if let Some(t) = self.tabs.borrow().iter().find(|t| t.session == name) {
+            t.page.queue_redraw();
+        }
+        // tmux: refresh every client attached to this session, off the UI
+        // thread (it shells out to tmux).
+        let ctl = (*self.ctl).clone();
+        std::thread::spawn(move || {
+            let Ok(clients) = ctl.run(&["list-clients", "-t", &name, "-F", "#{client_name}"])
+            else {
+                return;
+            };
+            for client in clients.lines().filter(|c| !c.is_empty()) {
+                let ok = ctl.run(&["refresh-client", "-t", client]).is_ok();
+                tracing::debug!("resize settled: refresh-client {client} on {name}: ok={ok}");
+            }
+        });
     }
 
     fn hide_dropdown(self: &Rc<Self>, dd: &hashterm_core::config::Dropdown) {
-        self.persist_height();
+        self.flush_geometry();
         self.held_focus.set(false);
         self.hiding.set(true);
         let backend = self.backend.clone();
@@ -784,14 +975,9 @@ impl MainWindow {
 
     /// Slide the console in at its configured edge/size (Q3-style).
     pub fn show_dropdown(self: &Rc<Self>, dd: &hashterm_core::config::Dropdown) {
-        // No explicit height in config -> restore the remembered one.
-        let mut dd = dd.clone();
-        if dd.height.is_none()
-            && let Some(px) = hashterm_core::state::UiState::load().window_height_px
-        {
-            dd.height = Some(format!("{px}px"));
-        }
-        let dd = &dd;
+        // The backend restores the remembered size/position (unless config
+        // pins an explicit height).
+        self.sync_saved_geometry();
         self.held_focus.set(false);
         // Assume the summoning key is still held; a key release or a
         // >1.2s quiet gap (see the guard above) lifts this.
@@ -822,6 +1008,14 @@ impl MainWindow {
             self.show_dropdown(&dd);
         } else {
             self.window.present();
+            // Plain-window mode: put it back where it was left (no-op where
+            // the platform can't place windows or the spot is off-screen).
+            if self.config.borrow().window.remember_position
+                && let Some(g) = self.saved_geometry()
+                && let (Some(x), Some(y)) = (g.x, g.y)
+            {
+                self.backend.move_to(&self.window, x, y);
+            }
         }
     }
 
@@ -957,6 +1151,104 @@ impl MainWindow {
         self.show_tab_osd();
     }
 
+    /// Wheel over the tab bar: step to the neighbouring tab of the active
+    /// group, stopping at the ends (a wheel that wraps around is disorienting).
+    pub fn scroll_tab(self: &Rc<Self>, forward: bool) {
+        let visible = self.visible_sessions();
+        let current = self.stack.visible_child_name().map(|s| s.to_string());
+        let Some(idx) = visible.iter().position(|s| Some(s) == current.as_ref()) else {
+            return;
+        };
+        let next = if forward {
+            idx + 1
+        } else if idx > 0 {
+            idx - 1
+        } else {
+            return;
+        };
+        let Some(target) = visible.get(next).cloned() else {
+            return;
+        };
+        tracing::debug!("wheel: tab {}/{} -> {}", idx + 1, visible.len(), next + 1);
+        self.select_tab(&target);
+        self.show_tab_osd();
+    }
+
+    /// Wheel over a group's title: step through THAT group's tabs, stopping at
+    /// its ends. Starts from the visible tab when the group is already active,
+    /// else from the tab it last had selected; selecting a tab of another group
+    /// switches to it.
+    pub fn scroll_group_tabs(self: &Rc<Self>, group: &str, forward: bool) {
+        let members: Vec<String> = self
+            .tabs
+            .borrow()
+            .iter()
+            .filter(|t| t.group_name() == group)
+            .map(|t| t.session.clone())
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        let current = if *self.active_group.borrow() == group {
+            self.stack.visible_child_name().map(|s| s.to_string())
+        } else {
+            self.last_active.borrow().get(group).cloned()
+        };
+        let idx = current
+            .and_then(|c| members.iter().position(|s| *s == c))
+            .unwrap_or(0);
+        let next = if forward {
+            idx + 1
+        } else if idx > 0 {
+            idx - 1
+        } else {
+            return;
+        };
+        let Some(target) = members.get(next).cloned() else {
+            return;
+        };
+        tracing::debug!(
+            "group wheel: {group} tab {}/{} -> {}",
+            idx + 1,
+            members.len(),
+            next + 1
+        );
+        self.select_tab(&target);
+        self.show_tab_osd();
+    }
+
+    /// Quick rename from the tab's right-click menu. Empty = back to the
+    /// automatic title (same semantics as the Properties dialog).
+    pub fn rename_tab(self: &Rc<Self>, session: &str) {
+        let Some(title) = self
+            .tabs
+            .borrow()
+            .iter()
+            .find(|t| t.session == session)
+            .map(|t| t.title.clone())
+        else {
+            return;
+        };
+        let session = session.to_owned();
+        self.prompt_text(
+            "Rename tab",
+            &title,
+            "empty = automatic title",
+            move |win, name| {
+                let id = hashterm_tmux::TmuxSessionId(session.clone());
+                let result = if name.is_empty() {
+                    win.ctl.clear_custom_title(&id)
+                } else {
+                    win.ctl.set_custom_title(&id, &name)
+                };
+                if let Err(e) = result {
+                    tracing::error!("renaming tab failed: {e}");
+                }
+                win.sync_from_server();
+            },
+        );
+    }
+
     /// Centered "name · 2/3" toast, scoped to the active group.
     /// Tab-switch OSD as a scroll-wheel: the current tab bright in the center
     /// with its "i/N" counter, and the prev/next tabs faded above and below.
@@ -1063,6 +1355,7 @@ impl MainWindow {
         let dd = self.config.borrow().dropdown.clone();
         if dd.enabled && self.window.is_visible() {
             self.slide.set_edge(dd.edge);
+            self.sync_saved_geometry();
             self.backend.place_and_show(&self.window, &dd);
         }
     }
@@ -1313,6 +1606,28 @@ impl MainWindow {
             .collect()
     }
 
+    /// Put `name` at position `index` in the group bar (persisted; the
+    /// group_order is what `groups()` sorts by, so group cycling follows it).
+    pub fn reorder_group(self: &Rc<Self>, name: &str, index: usize) {
+        let names: Vec<String> = self.groups().into_iter().map(|g| g.name).collect();
+        let Some(order) = reordered(&names, name, index) else {
+            return;
+        };
+        *self.group_order.borrow_mut() = order;
+        self.persist_group_state();
+        self.refresh_tabbar();
+    }
+
+    /// Shift a group `delta` places (right-click "Move Earlier/Later").
+    pub fn move_group(self: &Rc<Self>, name: &str, delta: i32) {
+        let names: Vec<String> = self.groups().into_iter().map(|g| g.name).collect();
+        let Some(from) = names.iter().position(|n| n == name) else {
+            return;
+        };
+        let to = (from as i64 + delta as i64).clamp(0, names.len() as i64 - 1) as usize;
+        self.reorder_group(name, to);
+    }
+
     fn persist_group_state(self: &Rc<Self>) {
         let mut st = hashterm_core::state::UiState::load();
         st.active_group = Some(self.active_group.borrow().clone());
@@ -1460,6 +1775,24 @@ impl MainWindow {
         initial: &str,
         on_done: impl Fn(&Rc<Self>, String) + 'static,
     ) {
+        // Group names are sanitized, and an empty one means "cancel".
+        self.prompt_text(dialog_title, initial, "", move |win, raw| {
+            let name = hashterm_tmux::controller::sanitize_group_name(&raw);
+            if !name.is_empty() {
+                on_done(win, name);
+            }
+        });
+    }
+
+    /// Single-line text prompt; `on_done` gets the trimmed text (possibly
+    /// empty — callers decide what empty means).
+    fn prompt_text(
+        self: &Rc<Self>,
+        dialog_title: &str,
+        initial: &str,
+        placeholder: &str,
+        on_done: impl Fn(&Rc<Self>, String) + 'static,
+    ) {
         let dialog = gtk4::Window::builder()
             .transient_for(&self.window)
             .modal(true)
@@ -1473,6 +1806,7 @@ impl MainWindow {
         root.set_margin_end(12);
         let entry = gtk4::Entry::builder()
             .text(initial)
+            .placeholder_text(placeholder)
             .activates_default(true)
             .build();
         root.append(&entry);
@@ -1496,11 +1830,8 @@ impl MainWindow {
             let this = Rc::downgrade(self);
             let dialog = dialog.clone();
             move |_| {
-                let name = hashterm_tmux::controller::sanitize_group_name(entry.text().trim());
+                let name = entry.text().trim().to_string();
                 dialog.close();
-                if name.is_empty() {
-                    return;
-                }
                 if let Some(win) = this.upgrade() {
                     on_done(&win, name);
                 }
@@ -1601,16 +1932,30 @@ impl MainWindow {
                 return;
             }
         };
-        let mut tabs = self.tabs.borrow_mut();
-
-        // Remove tabs whose session died.
-        tabs.retain(|t| {
-            let alive = live.iter().any(|s| s.name == t.session);
-            if !alive && let Some(child) = self.stack.child_by_name(&t.session) {
+        // Remove tabs whose session died. The stack children are removed only
+        // AFTER the `tabs` borrow is released: tearing down a page can emit
+        // VTE's child-exited synchronously, and handle_page_exit re-borrows
+        // `tabs` (a held borrow here aborts the whole app with "RefCell
+        // already borrowed").
+        let dead: Vec<String> = {
+            let mut tabs = self.tabs.borrow_mut();
+            let mut dead = Vec::new();
+            tabs.retain(|t| {
+                let alive = live.iter().any(|s| s.name == t.session);
+                if !alive {
+                    dead.push(t.session.clone());
+                }
+                alive
+            });
+            dead
+        };
+        for name in &dead {
+            if let Some(child) = self.stack.child_by_name(name) {
                 self.stack.remove(&child);
             }
-            alive
-        });
+        }
+
+        let mut tabs = self.tabs.borrow_mut();
 
         // Add tabs for sessions we don't show yet (created externally or adopted).
         for info in &live {
@@ -1716,7 +2061,21 @@ impl MainWindow {
     /// session killed, or server died). Drop the page; if the session still
     /// lives on the server, sync re-creates it with a fresh attach.
     pub fn handle_page_exit(self: &Rc<Self>, session: &str) {
-        self.tabs.borrow_mut().retain(|t| t.session != session);
+        // Can arrive synchronously from a widget teardown that happens while
+        // `tabs` is borrowed elsewhere: retry from the main loop instead of
+        // panicking (a panic inside a GTK callback aborts the process).
+        let Ok(mut tabs) = self.tabs.try_borrow_mut() else {
+            let this = Rc::downgrade(self);
+            let session = session.to_owned();
+            gtk4::glib::idle_add_local_once(move || {
+                if let Some(win) = this.upgrade() {
+                    win.handle_page_exit(&session);
+                }
+            });
+            return;
+        };
+        tabs.retain(|t| t.session != session);
+        drop(tabs);
         if let Some(child) = self.stack.child_by_name(session) {
             self.stack.remove(&child);
         }
@@ -1884,6 +2243,8 @@ impl MainWindow {
                 TabBarEvent::NewTab => win.new_tab(),
                 TabBarEvent::Reorder(id, index) => win.reorder_tab(&id, index),
                 TabBarEvent::Properties(id) => win.open_tab_properties(&id),
+                TabBarEvent::Rename(id) => win.rename_tab(&id),
+                TabBarEvent::Scroll(forward) => win.scroll_tab(forward),
                 TabBarEvent::MoveToGroup(session, group) => win.move_tab_to_group(&session, &group),
                 TabBarEvent::MoveToNewGroup(session) => win.move_tab_to_new_group(&session),
                 TabBarEvent::RenameGroup(name) => win.rename_group(&name),
@@ -1905,6 +2266,9 @@ impl MainWindow {
                 GroupBarEvent::ClearColor(name) => win.set_group_color_all(&name, None),
                 GroupBarEvent::MoveTab(session, group) => win.move_tab_to_group(&session, &group),
                 GroupBarEvent::MoveTabToNew(session) => win.move_tab_to_new_group(&session),
+                GroupBarEvent::Reorder(name, index) => win.reorder_group(&name, index),
+                GroupBarEvent::Shift(name, delta) => win.move_group(&name, delta),
+                GroupBarEvent::Scroll(name, forward) => win.scroll_group_tabs(&name, forward),
             }
         }));
     }
@@ -2162,7 +2526,12 @@ impl MainWindow {
             .widget()
             .set_reveal_child(!(gb_cfg.hide_when_single && groups.len() < 2));
         self.groupbar
-            .set_groups(groups.clone(), active_group.clone(), gb_cfg.show_counts);
+            .set_groups(
+                groups.clone(),
+                active_group.clone(),
+                gb_cfg.show_counts,
+                gb_cfg.reorderable,
+            );
         self.tabbar.set_tabs(infos, active, groups, active_group);
         self.apply_accents();
     }
@@ -2327,6 +2696,20 @@ impl MainWindow {
 /// The group bar's edge: the configured one, unless it is parallel to the
 /// tab bar — the matrix needs perpendicular axes, so a parallel setting (or
 /// none) resolves to the default perpendicular edge.
+/// `names` with `name` moved to `index` (clamped); None when it is unknown or
+/// already there.
+fn reordered(names: &[String], name: &str, index: usize) -> Option<Vec<String>> {
+    let from = names.iter().position(|n| n == name)?;
+    let mut out = names.to_vec();
+    let moved = out.remove(from);
+    let at = index.min(out.len());
+    if at == from {
+        return None;
+    }
+    out.insert(at, moved);
+    Some(out)
+}
+
 fn resolved_groupbar_edge(cfg: &Config) -> Edge {
     let tab_edge = cfg.tabbar.edge;
     let horizontal = |e: Edge| matches!(e, Edge::Top | Edge::Bottom);
@@ -2349,7 +2732,26 @@ fn resolved_groupbar_edge(cfg: &Config) -> Edge {
 
 #[cfg(test)]
 mod tests {
-    use super::resolved_groupbar_edge;
+    use super::{reordered, resolved_groupbar_edge};
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn reorder_moves_and_clamps() {
+        let g = names(&["a", "b", "c"]);
+        assert_eq!(reordered(&g, "a", 1), Some(names(&["b", "a", "c"])));
+        assert_eq!(reordered(&g, "a", 99), Some(names(&["b", "c", "a"])));
+        assert_eq!(reordered(&g, "c", 0), Some(names(&["c", "a", "b"])));
+    }
+
+    #[test]
+    fn reorder_noop_and_unknown() {
+        let g = names(&["a", "b", "c"]);
+        assert_eq!(reordered(&g, "b", 1), None);
+        assert_eq!(reordered(&g, "zzz", 0), None);
+    }
     use hashterm_core::config::{Config, Edge};
 
     fn cfg(tab: Edge, group: Option<Edge>) -> Config {

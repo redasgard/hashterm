@@ -6,14 +6,24 @@
 //! Hard constraint: `init_for_window` must run BEFORE the window is first
 //! realized — hence the `prepare()` phase of the backend trait.
 
-use crate::overlay::{Capabilities, OverlayBackend, OverlayError};
+use crate::overlay::{Capabilities, OverlayBackend, OverlayError, SavedSlot, resolve_size};
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge as LsEdge, KeyboardMode, Layer, LayerShell};
 use hashterm_core::config::{Dropdown, DropdownLayer, Edge};
+use hashterm_core::state::WindowGeometry;
 
-pub struct LayerShellOverlay;
+/// Layer surfaces are anchored by the compositor, so only the remembered SIZE
+/// applies; position is never restored here.
+#[derive(Default)]
+pub struct LayerShellOverlay {
+    saved: SavedSlot,
+}
 
 impl OverlayBackend for LayerShellOverlay {
+    fn set_saved_geometry(&self, g: Option<WindowGeometry>) {
+        self.saved.set(g);
+    }
+
     fn prepare(&self, win: &gtk4::ApplicationWindow, cfg: &Dropdown) -> Result<(), OverlayError> {
         if !gtk4_layer_shell::is_supported() {
             return Err(OverlayError::Unavailable(
@@ -44,10 +54,8 @@ impl OverlayBackend for LayerShellOverlay {
         if let Some(monitor) = crate::x11::pick_monitor(&WidgetExt::display(win), &cfg.monitor) {
             win.set_monitor(Some(&monitor));
             let geo = monitor.geometry();
-            win.set_default_size(
-                (geo.width() as f64 * cfg.width_pct) as i32,
-                crate::x11::resolve_height(cfg, geo.height()) as i32,
-            );
+            let (w, h) = resolve_size(cfg, geo.width(), geo.height(), self.saved.get().as_ref());
+            win.set_default_size(w as i32, h as i32);
         }
         win.present();
     }

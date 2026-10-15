@@ -41,6 +41,11 @@ pub enum TabBarEvent {
     Reorder(String, usize),
     /// Open the per-tab properties dialog (rename, accent color).
     Properties(String),
+    /// Quick rename of tab `0` (right-click > Rename…).
+    Rename(String),
+    /// Mouse wheel over the bar: select the next (true) / previous tab of the
+    /// active group. Does not wrap.
+    Scroll(bool),
     /// Move tab `0` into group `1`.
     MoveToGroup(String, String),
     /// Move tab into a brand-new group (name prompted).
@@ -101,6 +106,24 @@ impl TabBar {
         let handle = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         handle.append(&strip);
         wire_window_drag(&handle);
+
+        // Wheel over the bar steps through the active group's tabs. Capture
+        // phase: the inner ScrolledWindow would otherwise swallow the wheel
+        // to scroll the strip (we scroll the active tab into view instead).
+        // Deltas accumulate so a touchpad's fine-grained scroll still yields
+        // one step per ~1.0 of travel, like a notched wheel.
+        // Filled with the bar itself once it exists (the controller is built
+        // before the Rc).
+        let scroll_target: Rc<RefCell<Option<std::rc::Weak<TabBar>>>> =
+            Rc::new(RefCell::new(None));
+        {
+            let slot = scroll_target.clone();
+            handle.add_controller(wheel_steps(move |forward| {
+                if let Some(bar) = slot.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    bar.emit(TabBarEvent::Scroll(forward));
+                }
+            }));
+        }
 
         // Per-tab context menu: ONE reusable PopoverMenu on the stable handle.
         let tab_menu = gtk4::PopoverMenu::from_model(gtk4::gio::MenuModel::NONE);
@@ -191,6 +214,7 @@ impl TabBar {
             cfg: RefCell::new(cfg.clone()),
             menu_open,
         });
+        *scroll_target.borrow_mut() = Some(Rc::downgrade(&this));
 
         // menu_open covers every popover that must hold the bar revealed.
         {
@@ -256,6 +280,10 @@ impl TabBar {
         };
         {
             let s = session.to_owned();
+            add("rename", Box::new(move || TabBarEvent::Rename(s.clone())));
+        }
+        {
+            let s = session.to_owned();
             add(
                 "properties",
                 Box::new(move || TabBarEvent::Properties(s.clone())),
@@ -296,6 +324,7 @@ impl TabBar {
         }
 
         let model = gio::Menu::new();
+        model.append(Some("Rename…"), Some("tabctx.rename"));
         model.append(Some("Properties…"), Some("tabctx.properties"));
         let move_menu = gio::Menu::new();
         let current_group = self
@@ -409,9 +438,11 @@ impl TabBar {
                 });
                 let this = Rc::downgrade(self);
                 let id = tab.id.clone();
-                let btn = button.clone();
-                props.connect_released(move |_, _, x, y| {
-                    if let Some(bar) = this.upgrade() {
+                // No strong clone of `button` in here: the controller lives
+                // inside the button, so a captured clone is a reference
+                // cycle and every rebuilt tab would leak.
+                props.connect_released(move |g, _, x, y| {
+                    if let (Some(bar), Some(btn)) = (this.upgrade(), g.widget()) {
                         let point = btn
                             .compute_point(
                                 &bar.handle,
@@ -509,6 +540,9 @@ impl TabBar {
                 let Ok(dragged) = value.get::<String>() else {
                     return false;
                 };
+                if dragged.starts_with(crate::groupbar::GROUP_DRAG_PREFIX) {
+                    return false; // a group row, not a tab
+                }
                 let Some(bar) = this.upgrade() else {
                     return false;
                 };
@@ -541,7 +575,75 @@ impl TabBar {
             }
         });
         self.container.append(&plus);
+        self.reveal_active_tab();
     }
+
+    /// Scroll the strip so the active tab is fully visible (matters once
+    /// wheel-switching or hotkeys land on a tab beyond the visible part).
+    fn reveal_active_tab(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        // Allocation isn't known until after layout.
+        gtk4::glib::idle_add_local_once(move || {
+            let Some(bar) = weak.upgrade() else { return };
+            let Some(scroller) = bar
+                .container
+                .ancestor(gtk4::ScrolledWindow::static_type())
+                .and_then(|w| w.downcast::<gtk4::ScrolledWindow>().ok())
+            else {
+                return;
+            };
+            let mut child = bar.container.first_child();
+            while let Some(w) = child {
+                if let Some(t) = w.downcast_ref::<gtk4::ToggleButton>()
+                    && t.is_active()
+                    && let Some(b) = t.compute_bounds(&bar.container)
+                {
+                    let (adj, start, len) = if orientation(bar.cfg.borrow().edge)
+                        == gtk4::Orientation::Horizontal
+                    {
+                        (scroller.hadjustment(), b.x() as f64, b.width() as f64)
+                    } else {
+                        (scroller.vadjustment(), b.y() as f64, b.height() as f64)
+                    };
+                    let (lo, page) = (adj.value(), adj.page_size());
+                    if start < lo {
+                        adj.set_value(start);
+                    } else if start + len > lo + page {
+                        adj.set_value(start + len - page);
+                    }
+                    return;
+                }
+                child = w.next_sibling();
+            }
+        });
+    }
+}
+
+/// Mouse-wheel controller that reports one step per notch (`true` = down /
+/// right = forward). Capture phase, so an inner ScrolledWindow can't swallow
+/// the wheel. Deltas accumulate so a touchpad's fine-grained scroll still
+/// yields one step per ~1.0 of travel. Ctrl+Alt+Shift+wheel is left alone: it
+/// is the window-opacity chord.
+pub(crate) fn wheel_steps(on_step: impl Fn(bool) + 'static) -> gtk4::EventControllerScroll {
+    let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
+    scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let acc = std::cell::Cell::new(0.0_f64);
+    scroll.connect_scroll(move |ctl, dx, dy| {
+        use gtk4::gdk::ModifierType as M;
+        let chord = M::CONTROL_MASK | M::ALT_MASK | M::SHIFT_MASK;
+        if ctl.current_event_state().contains(chord) {
+            return gtk4::glib::Propagation::Proceed;
+        }
+        let d = if dy.abs() >= dx.abs() { dy } else { dx };
+        acc.set(acc.get() + d);
+        while acc.get().abs() >= 1.0 {
+            let forward = acc.get() > 0.0;
+            acc.set(acc.get() - if forward { 1.0 } else { -1.0 });
+            on_step(forward);
+        }
+        gtk4::glib::Propagation::Stop
+    });
+    scroll
 }
 
 /// Dragging EMPTY bar space moves the frameless window. Bubble phase: any

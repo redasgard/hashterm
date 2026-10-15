@@ -5,6 +5,40 @@
 //! backends; backends merely map/unmap the surface at final geometry.
 
 use hashterm_core::config::Dropdown;
+use hashterm_core::state::WindowGeometry;
+use std::cell::RefCell;
+
+/// Holder for the remembered geometry a backend consults in `place_and_show`.
+#[derive(Default)]
+pub struct SavedSlot(RefCell<Option<WindowGeometry>>);
+
+impl SavedSlot {
+    pub fn set(&self, g: Option<WindowGeometry>) {
+        *self.0.borrow_mut() = g;
+    }
+    pub fn get(&self) -> Option<WindowGeometry> {
+        *self.0.borrow()
+    }
+}
+
+/// Window size for the dropdown on a monitor of `mon_w` x `mon_h`: the
+/// remembered width/height where present, else the configured ones.
+pub(crate) fn resolve_size(
+    cfg: &Dropdown,
+    mon_w: i32,
+    mon_h: i32,
+    saved: Option<&WindowGeometry>,
+) -> (u32, u32) {
+    let w = match saved.and_then(|s| s.width) {
+        Some(w) => w.clamp(200.min(mon_w), mon_w) as u32,
+        None => (mon_w as f64 * cfg.width_pct) as u32,
+    };
+    let h = match saved.and_then(|s| s.height) {
+        Some(h) => h.clamp(120.min(mon_h), mon_h) as u32,
+        None => crate::x11::resolve_height(cfg, mon_h),
+    };
+    (w, h)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum OverlayError {
@@ -31,6 +65,16 @@ pub trait OverlayBackend {
     /// Map the surface at its final geometry (placement, stacking, monitor).
     fn place_and_show(&self, win: &gtk4::ApplicationWindow, cfg: &Dropdown);
     fn hide(&self, win: &gtk4::ApplicationWindow);
+    /// Remembered geometry to prefer over the configured one at the next
+    /// `place_and_show`. Backends that cannot honor a part ignore it.
+    fn set_saved_geometry(&self, _g: Option<WindowGeometry>) {}
+    /// Current top-left of the window in root coordinates, where the platform
+    /// can report it (X11/XWayland). None = unknown (native Wayland).
+    fn position(&self, _win: &gtk4::ApplicationWindow) -> Option<(i32, i32)> {
+        None
+    }
+    /// Move the window if the platform allows it and (x, y) is on-screen.
+    fn move_to(&self, _win: &gtk4::ApplicationWindow, _x: i32, _y: i32) {}
     /// Pin an already-mapped window above others without touching geometry
     /// (startup path; layer surfaces are inherently above, so default no-op).
     fn keep_above(&self, _win: &gtk4::ApplicationWindow) {}
@@ -47,9 +91,16 @@ pub trait OverlayBackend {
 /// Fallback for platforms with no placement/stacking control (e.g. GNOME
 /// Wayland): a normal window the compositor places; animation and focus-loss
 /// hiding still work, everything else is honestly absent.
-pub struct PlainWindowOverlay;
+#[derive(Default)]
+pub struct PlainWindowOverlay {
+    saved: SavedSlot,
+}
 
 impl OverlayBackend for PlainWindowOverlay {
+    fn set_saved_geometry(&self, g: Option<WindowGeometry>) {
+        self.saved.set(g);
+    }
+
     fn prepare(&self, _win: &gtk4::ApplicationWindow, _cfg: &Dropdown) -> Result<(), OverlayError> {
         Ok(())
     }
@@ -60,10 +111,8 @@ impl OverlayBackend for PlainWindowOverlay {
             && let Some(monitor) = WidgetExt::display(win).monitor_at_surface(&surface)
         {
             let geo = monitor.geometry();
-            win.set_default_size(
-                (geo.width() as f64 * cfg.width_pct) as i32,
-                crate::x11::resolve_height(cfg, geo.height()) as i32,
-            );
+            let (w, h) = resolve_size(cfg, geo.width(), geo.height(), self.saved.get().as_ref());
+            win.set_default_size(w as i32, h as i32);
         }
         win.present();
     }

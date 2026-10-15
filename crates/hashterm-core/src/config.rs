@@ -53,6 +53,7 @@ pub struct Config {
     pub appearance: Appearance,
     pub tabbar: TabBarCfg,
     pub groupbar: GroupBarCfg,
+    pub window: WindowCfg,
     pub scrollback: Scrollback,
     pub dropdown: Dropdown,
     pub hotkeys: Hotkeys,
@@ -176,6 +177,9 @@ pub struct GroupBarCfg {
     pub show_counts: bool,
     /// Reveal/conceal animation duration (ms).
     pub reveal_ms: u32,
+    /// Groups can be reordered by dragging them (and via the right-click
+    /// menu). The order is remembered across restarts.
+    pub reorderable: bool,
 }
 
 impl Default for GroupBarCfg {
@@ -185,6 +189,28 @@ impl Default for GroupBarCfg {
             hide_when_single: true,
             show_counts: true,
             reveal_ms: 150,
+            reorderable: true,
+        }
+    }
+}
+
+/// Remembering where the window was left.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowCfg {
+    /// Restore the size you last resized the window to.
+    pub remember_size: bool,
+    /// Restore the position you last moved the window to. Only where the
+    /// platform lets a client place its window (X11, XWayland); a no-op on
+    /// native Wayland, where the compositor owns placement.
+    pub remember_position: bool,
+}
+
+impl Default for WindowCfg {
+    fn default() -> Self {
+        Self {
+            remember_size: true,
+            remember_position: true,
         }
     }
 }

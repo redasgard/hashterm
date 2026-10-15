@@ -23,7 +23,11 @@ they were.
   between terminals. Groups get colors, drawn as nested accent rings around
   the terminal (outer = group, inner = per-tab accent). Drag a tab onto
   another to reorder, onto a group row to move it there, onto the group bar's
-  `+` for a brand-new group.
+  `+` for a brand-new group. Drag a group row onto another (or right-click >
+  Move Left/Right) to reorder groups; the order is remembered.
+- **Remembers its window** — size and position are saved when you move or
+  resize the window and restored next time (`[window]` in the config; position
+  needs X11/XWayland, native Wayland remembers size only).
 - **Session resurrection, browser-style** — full dumps capture layout,
   working directories, scrollback and the foreground program of every pane.
   Restores relaunch safe-listed programs (`vim -S` sessions included), and
@@ -86,7 +90,9 @@ cargo build --release          # needs Rust 1.90+
 | `Ctrl+Shift+S` | session picker (save / restore) |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste |
 | `Ctrl+Alt+Shift` + scroll | window opacity |
-| right-click tab / group row | properties, rename, colors, move to group |
+| mouse wheel over the tab bar | previous / next tab in the group |
+| mouse wheel over a group's title | previous / next tab of *that* group |
+| right-click tab / group row | rename, properties, colors, move to group |
 
 Everything is rebindable in `[hotkeys]`.
 

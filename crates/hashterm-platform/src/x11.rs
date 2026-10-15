@@ -4,13 +4,17 @@
 //! show with ConfigureWindow on the XID. The slide animation itself is
 //! client-side (SlidePanel) and never touches the XID per frame.
 
-use crate::overlay::{Capabilities, OverlayBackend, OverlayError};
+use crate::overlay::{Capabilities, OverlayBackend, OverlayError, SavedSlot, resolve_size};
 use gtk4::prelude::*;
 use hashterm_core::config::{Dropdown, Edge, MonitorPick};
+use hashterm_core::state::WindowGeometry;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 
-pub struct X11Overlay;
+#[derive(Default)]
+pub struct X11Overlay {
+    saved: SavedSlot,
+}
 
 const ADD_STATE: u32 = 1; // _NET_WM_STATE_ADD
 
@@ -19,6 +23,18 @@ impl X11Overlay {
         let surface = win.surface()?;
         let x11 = surface.downcast_ref::<gdk4_x11::X11Surface>()?;
         u32::try_from(x11.xid()).ok()
+    }
+
+    /// Top-left of the client area in root coordinates.
+    fn query_position(xid: u32) -> Option<(i32, i32)> {
+        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots[screen_num].root;
+        let t = conn
+            .translate_coordinates(xid, root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some((i32::from(t.dst_x), i32::from(t.dst_y)))
     }
 
     fn apply_ewmh(
@@ -115,16 +131,55 @@ pub(crate) fn resolve_height(cfg: &Dropdown, monitor_h: i32) -> u32 {
     h.clamp(120, monitor_h) as u32
 }
 
-/// Pixel geometry for the dropdown on the chosen monitor.
+/// True when a window at (x, y) of size w x h shows enough of itself on some
+/// monitor (a title-strip-sized overlap) to be grabbed and dragged back —
+/// guards against restoring onto a monitor that has since been unplugged.
+pub(crate) fn position_visible(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    monitors: &[(i32, i32, i32, i32)],
+) -> bool {
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let ox = (x + w).min(mx + mw) - x.max(mx);
+        let oy = (y + h).min(my + mh) - y.max(my);
+        ox >= 100.min(w) && oy >= 40.min(h)
+    })
+}
+
+fn monitor_rects(display: &gtk4::gdk::Display) -> Vec<(i32, i32, i32, i32)> {
+    let monitors = display.monitors();
+    (0..monitors.n_items())
+        .filter_map(|i| monitors.item(i)?.downcast::<gtk4::gdk::Monitor>().ok())
+        .map(|m| {
+            let g = m.geometry();
+            (g.x(), g.y(), g.width(), g.height())
+        })
+        .collect()
+}
+
+/// Pixel geometry for the dropdown on the chosen monitor. A remembered size
+/// replaces the configured one; a remembered, still-visible position replaces
+/// the edge anchoring.
 pub(crate) fn dropdown_geometry(
     win: &gtk4::ApplicationWindow,
     cfg: &Dropdown,
+    saved: Option<&WindowGeometry>,
 ) -> Option<(i32, i32, u32, u32)> {
     let display = WidgetExt::display(win);
     let monitor = pick_monitor(&display, &cfg.monitor)?;
     let geo = monitor.geometry();
-    let w = (geo.width() as f64 * cfg.width_pct) as u32;
-    let h = resolve_height(cfg, geo.height());
+    let (w, h) = resolve_size(cfg, geo.width(), geo.height(), saved);
+    if let Some(WindowGeometry {
+        x: Some(sx),
+        y: Some(sy),
+        ..
+    }) = saved
+        && position_visible(*sx, *sy, w as i32, h as i32, &monitor_rects(&display))
+    {
+        return Some((*sx, *sy, w, h));
+    }
     let (x, y) = match cfg.edge {
         Edge::Top => (geo.x() + (geo.width() - w as i32) / 2, geo.y()),
         Edge::Bottom => (
@@ -167,7 +222,8 @@ impl OverlayBackend for X11Overlay {
     }
 
     fn place_and_show(&self, win: &gtk4::ApplicationWindow, cfg: &Dropdown) {
-        if let Some((_, _, w, h)) = dropdown_geometry(win, cfg) {
+        let saved = self.saved.get();
+        if let Some((_, _, w, h)) = dropdown_geometry(win, cfg, saved.as_ref()) {
             win.set_default_size(w as i32, h as i32);
         }
         win.present();
@@ -179,7 +235,7 @@ impl OverlayBackend for X11Overlay {
                 tracing::warn!("x11 overlay: no XID after present");
                 return;
             };
-            let Some(geo) = dropdown_geometry(&win2, &cfg2) else {
+            let Some(geo) = dropdown_geometry(&win2, &cfg2, saved.as_ref()) else {
                 return;
             };
             if let Err(e) = Self::apply_ewmh(xid, Some(geo), true) {
@@ -190,6 +246,50 @@ impl OverlayBackend for X11Overlay {
 
     fn hide(&self, win: &gtk4::ApplicationWindow) {
         win.set_visible(false);
+    }
+
+    fn set_saved_geometry(&self, g: Option<WindowGeometry>) {
+        self.saved.set(g);
+    }
+
+    fn position(&self, win: &gtk4::ApplicationWindow) -> Option<(i32, i32)> {
+        Self::query_position(Self::xid(win)?)
+    }
+
+    fn move_to(&self, win: &gtk4::ApplicationWindow, x: i32, y: i32) {
+        let win = win.clone();
+        // present() maps the window asynchronously and the toolkit / window
+        // manager place it on map, racing a one-shot move. So: wait until it
+        // is mapped, then (re)request the spot until it is actually reported
+        // there (bounded, ~6 s). Once there, we stop — never fight the user.
+        let mut tries = 0;
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            tries += 1;
+            let give_up = tries >= 100;
+            let flow = |done: bool| {
+                if done || give_up {
+                    gtk4::glib::ControlFlow::Break
+                } else {
+                    gtk4::glib::ControlFlow::Continue
+                }
+            };
+            let xid = Self::xid(&win).filter(|_| win.is_mapped());
+            let Some(xid) = xid else {
+                return flow(false);
+            };
+            if Self::query_position(xid) == Some((x, y)) {
+                return flow(true);
+            }
+            let (w, h) = (win.width().max(1), win.height().max(1));
+            if !position_visible(x, y, w, h, &monitor_rects(&WidgetExt::display(&win))) {
+                return flow(true);
+            }
+            if let Ok((conn, _)) = x11rb::connect(None) {
+                let _ = conn.configure_window(xid, &xproto::ConfigureWindowAux::new().x(x).y(y));
+                let _ = conn.flush();
+            }
+            flow(false)
+        });
     }
 
     fn keep_above(&self, win: &gtk4::ApplicationWindow) {
@@ -225,5 +325,35 @@ impl OverlayBackend for X11Overlay {
 
     fn name(&self) -> &'static str {
         "x11-ewmh"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::position_visible;
+
+    const MON: [(i32, i32, i32, i32); 2] = [(0, 0, 1920, 1080), (1920, 0, 1280, 1024)];
+
+    #[test]
+    fn on_screen_is_visible() {
+        assert!(position_visible(100, 100, 800, 600, &MON));
+        assert!(position_visible(2000, 50, 800, 600, &MON));
+    }
+
+    #[test]
+    fn straddling_monitors_is_visible() {
+        assert!(position_visible(1500, 100, 800, 600, &MON));
+    }
+
+    #[test]
+    fn unplugged_monitor_is_not_visible() {
+        assert!(!position_visible(3300, 100, 800, 600, &MON));
+        assert!(!position_visible(100, 2000, 800, 600, &MON));
+        assert!(!position_visible(-780, 100, 800, 600, &MON)); // only 20px peeking in
+    }
+
+    #[test]
+    fn no_monitors_is_not_visible() {
+        assert!(!position_visible(0, 0, 800, 600, &[]));
     }
 }

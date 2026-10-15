@@ -4,12 +4,27 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Last window geometry (logical px). Each part is optional so the config can
+/// remember size without position (or vice versa), and so position — which
+/// native Wayland clients cannot read or set — is simply absent there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowGeometry {
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiState {
     /// Window height (logical px) at last hide/close; restored at startup
     /// unless the config pins an explicit dropdown.height.
     pub window_height_px: Option<i32>,
+    /// Window position/size remembered across moves, resizes and restarts
+    /// (see `[window]` in the config). Supersedes `window_height_px`.
+    pub window_geometry: Option<WindowGeometry>,
     /// Tab group shown when the app was last running.
     pub active_group: Option<String>,
     /// Display order of groups (names not listed sort after, first-seen).
@@ -119,6 +134,12 @@ mod tests {
     fn state_roundtrip_via_serde() {
         let s = UiState {
             window_height_px: Some(640),
+            window_geometry: Some(WindowGeometry {
+                x: Some(10),
+                y: None,
+                width: Some(900),
+                height: Some(640),
+            }),
             active_group: Some("work".into()),
             group_order: vec!["main".into(), "work".into()],
             last_active_tab: [("work".into(), "ht-1".into())].into(),
@@ -127,6 +148,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: UiState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.window_height_px, Some(640));
+        assert_eq!(back.window_geometry, s.window_geometry);
         // Unknown future fields must not break loading.
         let fwd: UiState = serde_json::from_str(r#"{"window_height_px":10,"later":1}"#).unwrap();
         assert_eq!(fwd.window_height_px, Some(10));

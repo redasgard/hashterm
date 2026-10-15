@@ -14,16 +14,16 @@ pub use overlay::{Capabilities, OverlayBackend, OverlayError, PlainWindowOverlay
 pub fn detect_backend(display: &gtk4::gdk::Display) -> Box<dyn OverlayBackend> {
     use gtk4::glib::object::Cast;
     if display.downcast_ref::<gdk4_x11::X11Display>().is_some() {
-        return Box::new(x11::X11Overlay);
+        return Box::new(x11::X11Overlay::default());
     }
     if display
         .downcast_ref::<gdk4_wayland::WaylandDisplay>()
         .is_some()
         && gtk4_layer_shell::is_supported()
     {
-        return Box::new(layershell::LayerShellOverlay);
+        return Box::new(layershell::LayerShellOverlay::default());
     }
-    Box::new(PlainWindowOverlay)
+    Box::new(PlainWindowOverlay::default())
 }
 
 /// True when running on an X11 GDK backend (for the XGrabKey hotkey path).

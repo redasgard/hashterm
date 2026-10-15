@@ -73,6 +73,18 @@ hide_when_single = true
 show_counts = true
 # Reveal/conceal animation duration (ms).
 reveal_ms = 150
+# Drag groups to reorder them (or right-click > Move Earlier/Later). The
+# order is remembered across restarts.
+reorderable = true
+
+[window]
+# Remember the window's size and position when you resize/move it, and restore
+# them next time it appears. Position needs a platform that lets apps place
+# their own windows (X11 / XWayland — the GNOME default here); native Wayland
+# remembers size only. An explicit [dropdown] height/width/edge edit in this
+# file discards what was remembered.
+remember_size = true
+remember_position = true
 
 [scrollback]
 # Applied as tmux history-limit on the dedicated server (new panes).

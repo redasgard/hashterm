@@ -126,6 +126,11 @@ impl TerminalPage {
             )));
     }
 
+    /// Force a repaint of the terminal widget (used after a window resize).
+    pub fn queue_redraw(&self) {
+        self.term.queue_draw();
+    }
+
     pub fn grab_focus(&self) {
         self.term.grab_focus();
     }

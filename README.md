@@ -104,6 +104,13 @@ source of truth. Details: [docs/settings.md](docs/settings.md).
 
 ### Organizing tabs and groups
 
+Closing is predictable: when you close the tab you are on (`Ctrl+Shift+W`, its
+`x`, or the shell exiting) you land on the previous tab in the group — or the
+next one if it was the first. Closing a group's last tab asks whether to close
+the group; "Keep group" opens a fresh tab in your home directory instead.
+Hover a group row and click its `x` to close the whole group (after a
+confirmation — it ends the programs in all its tabs and cannot be undone).
+
 Right-click a tab to rename it, change its accent color, move it to another
 group or close it. Right-click a group to rename it, color it, or move it up and
 down (you can also just drag it).

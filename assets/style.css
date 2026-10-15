@@ -162,3 +162,15 @@ window.hashterm.dropdown.edge-right .console-body {
 .settings-list row + row {
   border-top: 1px solid alpha(currentColor, 0.1);
 }
+
+/* Group row close button: revealed by the row's hover handler (opacity). */
+.group-close {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  border-radius: 8px;
+}
+.group-close:hover {
+  background-color: alpha(currentColor, 0.18);
+}

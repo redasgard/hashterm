@@ -61,6 +61,21 @@ use crate::slide::SlidePanel;
 use crate::tabbar::{Badge, TabBar, TabBarEvent, TabInfo};
 use hashterm_platform::OverlayBackend;
 
+/// Facts about a tab captured just before it is removed.
+struct Removal {
+    group: String,
+    /// Position of the tab within its group.
+    index: usize,
+    /// It was the tab being shown.
+    was_active: bool,
+    /// The group's color, to restore if the group is kept.
+    color: Option<String>,
+    /// Group to land on if the group disappears.
+    neighbor: Option<String>,
+    /// Position of the group in the group bar (restored if it is kept).
+    group_index: usize,
+}
+
 struct TabEntry {
     /// tmux session name; also the Stack child name.
     session: String,
@@ -109,6 +124,9 @@ pub struct MainWindow {
     /// before hide_on_focus_loss may fire (focus-stealing prevention can show
     /// us unfocused, which must not count as "lost focus").
     held_focus: std::cell::Cell<bool>,
+    /// A modal confirmation (close group / empty group) is on screen: the
+    /// dropdown must not hide because the dialog took focus.
+    modal_open: std::cell::Cell<bool>,
     /// Set on every show: the toggle key that summoned the window is likely
     /// still physically held, and its AUTO-REPEAT presses would land in the
     /// freshly-focused window and instantly toggle it back off. Cleared by a
@@ -277,6 +295,7 @@ impl MainWindow {
             current_shortcuts: RefCell::new(Vec::new()),
             last_toggle: std::cell::Cell::new(None),
             held_focus: std::cell::Cell::new(false),
+            modal_open: std::cell::Cell::new(false),
             capture_suppressed: std::cell::Cell::new(false),
             shown_at: std::cell::Cell::new(None),
             last_capture_attempt: std::cell::Cell::new(None),
@@ -595,19 +614,29 @@ impl MainWindow {
         cwd: Option<std::path::PathBuf>,
         command: Option<Vec<String>>,
     ) {
-        let cfg = self.config.borrow();
         let cwd = cwd.or_else(|| {
-            if cfg.general.inherit_cwd {
+            if self.config.borrow().general.inherit_cwd {
                 self.active_entry_cwd()
             } else {
                 None
             }
         });
         // New tabs inherit the active group (None for the implicit default).
-        let group = {
-            let g = self.active_group.borrow().clone();
-            (g != hashterm_tmux::controller::DEFAULT_GROUP).then_some(g)
-        };
+        let group = self.active_group.borrow().clone();
+        self.spawn_tab(&group, cwd, command, None);
+    }
+
+    /// Create a tab in `group` and focus it. `color` re-applies a group color
+    /// (used when a group's last tab was closed and the user keeps the group).
+    fn spawn_tab(
+        self: &Rc<Self>,
+        group: &str,
+        cwd: Option<std::path::PathBuf>,
+        command: Option<Vec<String>>,
+        color: Option<&str>,
+    ) {
+        let cfg = self.config.borrow();
+        let group = (group != hashterm_tmux::controller::DEFAULT_GROUP).then(|| group.to_owned());
         let opts = NewSessionOpts {
             title: "shell".into(),
             cwd,
@@ -617,6 +646,9 @@ impl MainWindow {
         drop(cfg);
         match self.ctl.new_session(&opts) {
             Ok(id) => {
+                if let Some(color) = color {
+                    let _ = self.ctl.set_group_color(&id, Some(color));
+                }
                 self.sync_from_server();
                 // Focus the freshly created tab.
                 if let Ok(sessions) = self.ctl.list_sessions()
@@ -1038,13 +1070,22 @@ impl MainWindow {
                 return;
             }
             let dd = win.config.borrow().dropdown.clone();
-            if !dd.enabled || !dd.hide_on_focus_loss || !w.is_visible() || !win.held_focus.get() {
+            if !dd.enabled
+                || !dd.hide_on_focus_loss
+                || !w.is_visible()
+                || !win.held_focus.get()
+                || win.modal_open.get()
+            {
                 return;
             }
             let this2 = Rc::downgrade(&win);
             gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                 let Some(win) = this2.upgrade() else { return };
-                if !win.window.is_active() && win.window.is_visible() && win.held_focus.get() {
+                if !win.window.is_active()
+                    && win.window.is_visible()
+                    && win.held_focus.get()
+                    && !win.modal_open.get()
+                {
                     win.toggle_dropdown_from("focus-loss");
                 }
             });
@@ -1056,15 +1097,247 @@ impl MainWindow {
         if kill && let Err(e) = self.ctl.run(&["kill-session", "-t", session]) {
             tracing::error!("kill-session {session}: {e}");
         }
+        let removal = self.removal_info(session);
         self.tabs.borrow_mut().retain(|t| t.session != session);
         if let Some(child) = self.stack.child_by_name(session) {
             self.stack.remove(&child);
         }
+        match removal {
+            Some(r) => self.after_tab_removed(r),
+            None => {
+                self.validate_active_group();
+                self.refresh_tabbar();
+            }
+        }
+    }
+
+    /// What the window needs to remember about a tab that is about to go
+    /// away, so selection can follow it afterwards (see `after_tab_removed`).
+    fn removal_info(self: &Rc<Self>, session: &str) -> Option<Removal> {
+        let (group, index, color) = {
+            let tabs = self.tabs.borrow();
+            let t = tabs.iter().find(|t| t.session == session)?;
+            let group = t.group_name().to_owned();
+            let members: Vec<&TabEntry> =
+                tabs.iter().filter(|x| x.group_name() == group).collect();
+            let index = members.iter().position(|x| x.session == session)?;
+            let color = members.iter().find_map(|x| x.group_color.clone());
+            (group, index, color)
+        };
+        let was_active = self
+            .stack
+            .visible_child_name()
+            .is_some_and(|n| n.as_str() == session);
+        // Neighbouring group (previous, else next) to land on if this group
+        // disappears with its last tab.
+        let names: Vec<String> = self.groups().into_iter().map(|g| g.name).collect();
+        let group_index = names.iter().position(|n| *n == group).unwrap_or(0);
+        let neighbor = names.iter().position(|n| *n == group).and_then(|i| {
+            i.checked_sub(1)
+                .and_then(|p| names.get(p))
+                .or_else(|| names.get(i + 1))
+                .cloned()
+        });
+        Some(Removal {
+            group,
+            index,
+            was_active,
+            color,
+            neighbor,
+            group_index,
+        })
+    }
+
+    /// Selection policy after a tab was closed (any way: Ctrl+W, the x button,
+    /// the shell exiting):
+    /// * a background tab closing changes nothing;
+    /// * otherwise go to the PREVIOUS tab of the group, or — if the first tab
+    ///   was closed — the NEXT one;
+    /// * if the group has no tabs left, ask whether to close the group or to
+    ///   keep it with a fresh tab in the home directory.
+    fn after_tab_removed(self: &Rc<Self>, r: Removal) {
+        if !r.was_active {
+            self.validate_active_group();
+            self.refresh_tabbar();
+            return;
+        }
+        let remaining: Vec<String> = self
+            .tabs
+            .borrow()
+            .iter()
+            .filter(|t| t.group_name() == r.group)
+            .map(|t| t.session.clone())
+            .collect();
+        if !remaining.is_empty() {
+            let pick = if r.index > 0 {
+                remaining[(r.index - 1).min(remaining.len() - 1)].clone()
+            } else {
+                remaining[0].clone()
+            };
+            self.select_tab(&pick);
+            self.show_tab_osd();
+            return;
+        }
+        // The group is empty. Show the neighbouring group behind the dialog
+        // (never a stale/blank page), then ask.
+        match r.neighbor.clone() {
+            Some(n) if self.tabs.borrow().iter().any(|t| t.group_name() == n) => {
+                self.switch_group(&n);
+            }
+            _ => self.validate_active_group(),
+        }
+        self.refresh_tabbar();
+        self.ask_empty_group(r.group, r.color, r.group_index);
+    }
+
+    /// "No more tabs left" prompt. Yes: the group goes away (and the window
+    /// closes if it was the last one). No: keep the group with a new tab in
+    /// the home directory.
+    fn ask_empty_group(self: &Rc<Self>, group: String, color: Option<String>, position: usize) {
+        if self.modal_open.get() {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        let detail = format!(
+            "Group \u{201c}{group}\u{201d} is empty. \u{201c}Keep group\u{201d} opens a new tab \
+             in your home directory."
+        );
+        self.confirm(
+            "No more tabs left, do you want to close the group?",
+            &detail,
+            "Close group",
+            "Keep group",
+            false,
+            move |close| {
+                let Some(win) = this.upgrade() else { return };
+                if close {
+                    if win.tabs.borrow().is_empty() {
+                        win.window.close();
+                    }
+                } else {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    win.spawn_tab(&group, home, None, color.as_deref());
+                    // The group vanished from the bar while empty; put it
+                    // back where it was.
+                    win.reorder_group(&group, position);
+                }
+            },
+        );
+    }
+
+    /// Modal yes/no. `on_answer(true)` = the affirmative button. Closing the
+    /// dialog any other way counts as the negative answer.
+    fn confirm(
+        self: &Rc<Self>,
+        title: &str,
+        detail: &str,
+        yes: &str,
+        no: &str,
+        yes_is_default: bool,
+        on_answer: impl FnOnce(bool) + 'static,
+    ) {
+        self.modal_open.set(true);
+        let dialog = gtk4::AlertDialog::builder()
+            .message(title)
+            .detail(detail)
+            .buttons([no, yes])
+            .cancel_button(0)
+            .default_button(if yes_is_default { 1 } else { 0 })
+            .modal(true)
+            .build();
+        let this = Rc::downgrade(self);
+        dialog.choose(
+            Some(&self.window),
+            None::<&gtk4::gio::Cancellable>,
+            move |res| {
+                if let Some(win) = this.upgrade() {
+                    win.modal_open.set(false);
+                }
+                on_answer(matches!(res, Ok(1)));
+                // GTK hands focus back to whatever held it before the dialog,
+                // which may be a page that is no longer shown: put the
+                // keyboard on the terminal the user is looking at.
+                let this = this.clone();
+                gtk4::glib::idle_add_local_once(move || {
+                    if let Some(win) = this.upgrade() {
+                        win.with_active_page(|p| p.grab_focus());
+                    }
+                });
+            },
+        );
+    }
+
+    /// Close a group with every tab in it — no undo (the sessions are killed
+    /// on the tmux server, not detached). Asks first.
+    pub fn close_group(self: &Rc<Self>, name: &str) {
+        let count = self
+            .tabs
+            .borrow()
+            .iter()
+            .filter(|t| t.group_name() == name)
+            .count();
+        if count == 0 {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        let group = name.to_owned();
+        let tabs_word = if count == 1 { "tab" } else { "tabs" };
+        self.confirm(
+            &format!("Close group \u{201c}{name}\u{201d}?"),
+            &format!(
+                "This closes all {count} {tabs_word} in the group and ends the programs \
+                 running in them. It cannot be undone."
+            ),
+            &format!("Close {count} {tabs_word}"),
+            "Cancel",
+            false,
+            move |yes| {
+                if yes && let Some(win) = this.upgrade() {
+                    win.close_group_now(&group);
+                }
+            },
+        );
+    }
+
+    fn close_group_now(self: &Rc<Self>, name: &str) {
+        let sessions: Vec<String> = self
+            .tabs
+            .borrow()
+            .iter()
+            .filter(|t| t.group_name() == name)
+            .map(|t| t.session.clone())
+            .collect();
+        if sessions.is_empty() {
+            return;
+        }
+        let was_active = *self.active_group.borrow() == name;
+        let names: Vec<String> = self.groups().into_iter().map(|g| g.name).collect();
+        let neighbor = names.iter().position(|n| n == name).and_then(|i| {
+            i.checked_sub(1)
+                .and_then(|p| names.get(p))
+                .or_else(|| names.get(i + 1))
+                .cloned()
+        });
+        for session in &sessions {
+            if let Err(e) = self.ctl.run(&["kill-session", "-t", session]) {
+                tracing::error!("kill-session {session}: {e}");
+            }
+        }
+        self.tabs
+            .borrow_mut()
+            .retain(|t| !sessions.contains(&t.session));
+        for session in &sessions {
+            if let Some(child) = self.stack.child_by_name(session) {
+                self.stack.remove(&child);
+            }
+        }
+        self.last_active.borrow_mut().remove(name);
         if self.tabs.borrow().is_empty() {
-            // No tabs left ANYWHERE -> close; an emptied active group merely
-            // switches to a surviving one (validate_active_group).
             self.window.close();
             return;
+        }
+        if was_active && let Some(n) = neighbor {
+            self.switch_group(&n);
         }
         self.validate_active_group();
         self.refresh_tabbar();
@@ -1937,6 +2210,16 @@ impl MainWindow {
         // VTE's child-exited synchronously, and handle_page_exit re-borrows
         // `tabs` (a held borrow here aborts the whole app with "RefCell
         // already borrowed").
+        let removals: Vec<Removal> = {
+            let tabs = self.tabs.borrow();
+            let gone: Vec<String> = tabs
+                .iter()
+                .filter(|t| !live.iter().any(|s| s.name == t.session))
+                .map(|t| t.session.clone())
+                .collect();
+            drop(tabs);
+            gone.iter().filter_map(|s| self.removal_info(s)).collect()
+        };
         let dead: Vec<String> = {
             let mut tabs = self.tabs.borrow_mut();
             let mut dead = Vec::new();
@@ -2053,6 +2336,9 @@ impl MainWindow {
             }
         }
 
+        for r in removals {
+            self.after_tab_removed(r);
+        }
         self.validate_active_group();
         self.refresh_tabbar();
     }
@@ -2064,7 +2350,7 @@ impl MainWindow {
         // Can arrive synchronously from a widget teardown that happens while
         // `tabs` is borrowed elsewhere: retry from the main loop instead of
         // panicking (a panic inside a GTK callback aborts the process).
-        let Ok(mut tabs) = self.tabs.try_borrow_mut() else {
+        let Ok(tabs) = self.tabs.try_borrow_mut() else {
             let this = Rc::downgrade(self);
             let session = session.to_owned();
             gtk4::glib::idle_add_local_once(move || {
@@ -2074,14 +2360,15 @@ impl MainWindow {
             });
             return;
         };
-        tabs.retain(|t| t.session != session);
         drop(tabs);
+        let removal = self.removal_info(session);
+        self.tabs.borrow_mut().retain(|t| t.session != session);
         if let Some(child) = self.stack.child_by_name(session) {
             self.stack.remove(&child);
         }
         self.sync_from_server();
-        if self.tabs.borrow().is_empty() {
-            self.window.close();
+        if let Some(r) = removal {
+            self.after_tab_removed(r);
         }
     }
 
@@ -2270,6 +2557,7 @@ impl MainWindow {
                 GroupBarEvent::Reorder(name, index) => win.reorder_group(&name, index),
                 GroupBarEvent::Shift(name, delta) => win.move_group(&name, delta),
                 GroupBarEvent::Scroll(name, forward) => win.scroll_group_tabs(&name, forward),
+                GroupBarEvent::Close(name) => win.close_group(&name),
             }
         }));
     }

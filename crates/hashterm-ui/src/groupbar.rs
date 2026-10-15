@@ -33,6 +33,8 @@ pub enum GroupBarEvent {
     /// Wheel over group `0`'s row: step through THAT group's tabs
     /// (`true` = next).
     Scroll(String, bool),
+    /// Close group `0` with ALL its tabs (the window asks for confirmation).
+    Close(String),
 }
 
 /// Drag payload prefix that tells a dragged GROUP row from a dragged tab
@@ -266,6 +268,50 @@ impl GroupBar {
             let inner = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
             inner.append(&dot);
             inner.append(&label);
+            // Close-group button. It is an OVERLAY sibling of the row, not a
+            // child of it: a button nested in a toggle button loses its clicks
+            // to the row's drag/click gestures. Invisible (and untargetable, so
+            // a stray click can't hit it) until the pointer is over the row;
+            // the row reserves its space so rows never jump on hover.
+            let close = gtk4::Button::builder()
+                .icon_name("window-close-symbolic")
+                .has_frame(false)
+                .halign(gtk4::Align::End)
+                .valign(gtk4::Align::Center)
+                .margin_end(6)
+                .tooltip_text(format!("Close group \"{}\" and all its tabs", g.name))
+                .build();
+            close.add_css_class("group-close");
+            close.set_opacity(0.0);
+            close.set_can_target(false);
+            {
+                let this = Rc::downgrade(self);
+                let name = g.name.clone();
+                close.connect_clicked(move |_| {
+                    if let Some(bar) = this.upgrade() {
+                        bar.emit(GroupBarEvent::Close(name.clone()));
+                    }
+                });
+            }
+            inner.set_margin_end(22);
+            let row = gtk4::Overlay::new();
+            row.set_child(Some(&button));
+            row.add_overlay(&close);
+            {
+                // contains-pointer covers the row AND the overlaid button:
+                // enter/leave would fire when the pointer moves onto the
+                // button itself, hiding it from under the cursor.
+                let motion = gtk4::EventControllerMotion::new();
+                let c = close.downgrade();
+                motion.connect_contains_pointer_notify(move |m| {
+                    if let Some(c) = c.upgrade() {
+                        let on = m.contains_pointer();
+                        c.set_opacity(if on { 1.0 } else { 0.0 });
+                        c.set_can_target(on);
+                    }
+                });
+                row.add_controller(motion);
+            }
             button.set_child(Some(&inner));
 
             let this = Rc::downgrade(self);
@@ -385,7 +431,7 @@ impl GroupBar {
                 button.add_controller(drop);
             }
 
-            self.container.append(&button);
+            self.container.append(&row);
         }
 
         // "+" creates a group (with a fresh tab); dropping a tab on it moves

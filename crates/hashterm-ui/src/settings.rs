@@ -127,6 +127,49 @@ const PAGES: &[Page] = &[
                 ],
             },
             Group {
+                title: "Notifications",
+                fields: &[
+                    f!(
+                        "notifications",
+                        "enabled",
+                        "Desktop notifications",
+                        "Tabs and groups always light up; this adds a desktop notification.",
+                        Kind::Bool
+                    ),
+                    f!(
+                        "notifications",
+                        "on_bell",
+                        "Notify on a terminal bell",
+                        "",
+                        Kind::Bool
+                    ),
+                    f!(
+                        "notifications",
+                        "on_activity",
+                        "Notify on output in a background tab",
+                        "After 5 seconds of silence. Can be noisy.",
+                        Kind::Bool
+                    ),
+                    f!(
+                        "notifications",
+                        "only_when_unseen",
+                        "Skip the tab I am looking at",
+                        "",
+                        Kind::Bool
+                    ),
+                ],
+            },
+            Group {
+                title: "Links",
+                fields: &[f!(
+                    "links",
+                    "enabled",
+                    "Ctrl+click opens links",
+                    "http, https and mailto, including hyperlinks programs print.",
+                    Kind::Bool
+                )],
+            },
+            Group {
                 title: "Startup",
                 fields: &[
                     f!(
@@ -141,6 +184,13 @@ const PAGES: &[Page] = &[
                         "autostart",
                         "Start with my desktop session",
                         "Keeps an autostart entry in sync with this switch.",
+                        Kind::Bool
+                    ),
+                    f!(
+                        "general",
+                        "log_to_file",
+                        "Keep a log file for bug reports",
+                        "~/.local/state/hashterm/hashterm.log, rotated at 2 MiB.",
                         Kind::Bool
                     ),
                 ],
@@ -163,17 +213,97 @@ const PAGES: &[Page] = &[
                     ),
                     f!(
                         "appearance",
-                        "foreground",
-                        "Text color",
-                        "",
-                        Kind::Color
+                        "scheme",
+                        "Color scheme",
+                        "Default uses the text and background colors below.",
+                        Kind::Choice(&[
+                            ("default", "Default"),
+                            ("tomorrow-night", "Tomorrow Night"),
+                            ("dracula", "Dracula"),
+                            ("nord", "Nord"),
+                            ("solarized-dark", "Solarized Dark"),
+                            ("solarized-light", "Solarized Light"),
+                            ("gruvbox-dark", "Gruvbox Dark"),
+                            ("gruvbox-light", "Gruvbox Light"),
+                            ("catppuccin-mocha", "Catppuccin Mocha"),
+                            ("catppuccin-latte", "Catppuccin Latte"),
+                            ("tokyo-night", "Tokyo Night"),
+                            ("one-half-dark", "One Half Dark"),
+                            ("atom-one-light", "Atom One Light")
+                        ])
                     ),
+                    f!(
+                        "appearance",
+                        "follow_system",
+                        "Follow the desktop's light/dark setting",
+                        "Uses the light and dark schemes below instead of the one above.",
+                        Kind::Bool
+                    ),
+                    f!(
+                        "appearance",
+                        "scheme_dark",
+                        "Scheme for dark mode",
+                        "",
+                        Kind::Choice(&[
+                            ("tomorrow-night", "Tomorrow Night"),
+                            ("dracula", "Dracula"),
+                            ("nord", "Nord"),
+                            ("solarized-dark", "Solarized Dark"),
+                            ("solarized-light", "Solarized Light"),
+                            ("gruvbox-dark", "Gruvbox Dark"),
+                            ("gruvbox-light", "Gruvbox Light"),
+                            ("catppuccin-mocha", "Catppuccin Mocha"),
+                            ("catppuccin-latte", "Catppuccin Latte"),
+                            ("tokyo-night", "Tokyo Night"),
+                            ("one-half-dark", "One Half Dark"),
+                            ("atom-one-light", "Atom One Light")
+                        ])
+                    ),
+                    f!(
+                        "appearance",
+                        "scheme_light",
+                        "Scheme for light mode",
+                        "",
+                        Kind::Choice(&[
+                            ("tomorrow-night", "Tomorrow Night"),
+                            ("dracula", "Dracula"),
+                            ("nord", "Nord"),
+                            ("solarized-dark", "Solarized Dark"),
+                            ("solarized-light", "Solarized Light"),
+                            ("gruvbox-dark", "Gruvbox Dark"),
+                            ("gruvbox-light", "Gruvbox Light"),
+                            ("catppuccin-mocha", "Catppuccin Mocha"),
+                            ("catppuccin-latte", "Catppuccin Latte"),
+                            ("tokyo-night", "Tokyo Night"),
+                            ("one-half-dark", "One Half Dark"),
+                            ("atom-one-light", "Atom One Light")
+                        ])
+                    ),
+                    f!("appearance", "foreground", "Text color", "", Kind::Color),
                     f!(
                         "appearance",
                         "background",
                         "Background color",
                         "",
                         Kind::Color
+                    ),
+                    f!(
+                        "appearance",
+                        "cursor_shape",
+                        "Cursor shape",
+                        "",
+                        Kind::Choice(&[
+                            ("block", "Block"),
+                            ("ibeam", "Bar"),
+                            ("underline", "Underline")
+                        ])
+                    ),
+                    f!(
+                        "appearance",
+                        "cursor_blink",
+                        "Blinking cursor",
+                        "",
+                        Kind::Bool
                     ),
                     f!(
                         "appearance",
@@ -203,7 +333,10 @@ const PAGES: &[Page] = &[
                         "opacity",
                         "Terminal background",
                         "Text stays fully opaque. Needs a compositor on X11.",
-                        Kind::Fraction { min: 0.05, max: 1.0 }
+                        Kind::Fraction {
+                            min: 0.05,
+                            max: 1.0
+                        }
                     ),
                     f!(
                         "appearance",
@@ -241,13 +374,7 @@ const PAGES: &[Page] = &[
             Group {
                 title: "Tab bar",
                 fields: &[
-                    f!(
-                        "tabbar",
-                        "edge",
-                        "Position",
-                        "",
-                        Kind::Choice(EDGES)
-                    ),
+                    f!("tabbar", "edge", "Position", "", Kind::Choice(EDGES)),
                     f!(
                         "tabbar",
                         "auto_hide",
@@ -255,13 +382,7 @@ const PAGES: &[Page] = &[
                         "The bar slides in over the terminal. Ctrl+Shift+B toggles it.",
                         Kind::Bool
                     ),
-                    f!(
-                        "tabbar",
-                        "show_close",
-                        "Show close buttons",
-                        "",
-                        Kind::Bool
-                    ),
+                    f!("tabbar", "show_close", "Show close buttons", "", Kind::Bool),
                     f!(
                         "tabbar",
                         "reveal_on_badge",
@@ -274,6 +395,13 @@ const PAGES: &[Page] = &[
                         "switch_osd",
                         "Show the tab-switch popup",
                         "The dial that appears when you change tabs.",
+                        Kind::Bool
+                    ),
+                    f!(
+                        "tabbar",
+                        "auto_titles",
+                        "Name tabs after the folder or running program",
+                        "Off: tabs show the host name until a program sets a title.",
                         Kind::Bool
                     ),
                     f!(
@@ -306,13 +434,7 @@ const PAGES: &[Page] = &[
                         "",
                         Kind::Bool
                     ),
-                    f!(
-                        "groupbar",
-                        "show_counts",
-                        "Show tab counts",
-                        "",
-                        Kind::Bool
-                    ),
+                    f!("groupbar", "show_counts", "Show tab counts", "", Kind::Bool),
                     f!(
                         "groupbar",
                         "reorderable",
@@ -533,40 +655,18 @@ const PAGES: &[Page] = &[
             Group {
                 title: "Tabs",
                 fields: &[
-                    f!(
-                        "hotkeys",
-                        "new_tab",
-                        "New tab",
-                        "",
-                        Kind::Accel
-                    ),
-                    f!(
-                        "hotkeys",
-                        "close_tab",
-                        "Close tab",
-                        "",
-                        Kind::Accel
-                    ),
-                    f!(
-                        "hotkeys",
-                        "next_tab",
-                        "Next tab",
-                        "",
-                        Kind::Accel
-                    ),
-                    f!(
-                        "hotkeys",
-                        "prev_tab",
-                        "Previous tab",
-                        "",
-                        Kind::Accel
-                    ),
+                    f!("hotkeys", "new_tab", "New tab", "", Kind::Accel),
+                    f!("hotkeys", "close_tab", "Close tab", "", Kind::Accel),
+                    f!("hotkeys", "next_tab", "Next tab", "", Kind::Accel),
+                    f!("hotkeys", "prev_tab", "Previous tab", "", Kind::Accel),
                     f!(
                         "hotkeys",
                         "goto_tab_modifier",
                         "Jump to tab 1-10",
                         "Modifier + 1..9, 0, e.g. <Alt>. Empty turns it off.",
-                        Kind::Text { placeholder: "<Alt>" }
+                        Kind::Text {
+                            placeholder: "<Alt>"
+                        }
                     ),
                     f!(
                         "hotkeys",
@@ -580,20 +680,20 @@ const PAGES: &[Page] = &[
             Group {
                 title: "Groups",
                 fields: &[
-                    f!(
-                        "hotkeys",
-                        "next_group",
-                        "Next group",
-                        "",
-                        Kind::Accel
-                    ),
-                    f!(
-                        "hotkeys",
-                        "prev_group",
-                        "Previous group",
-                        "",
-                        Kind::Accel
-                    ),
+                    f!("hotkeys", "next_group", "Next group", "", Kind::Accel),
+                    f!("hotkeys", "prev_group", "Previous group", "", Kind::Accel),
+                    f!("hotkeys", "new_group", "New group", "", Kind::Accel),
+                    f!("hotkeys", "split_right", "Split right", "", Kind::Accel),
+                    f!("hotkeys", "split_down", "Split down", "", Kind::Accel),
+                    f!("hotkeys", "pane_left", "Focus pane left", "", Kind::Accel),
+                    f!("hotkeys", "pane_right", "Focus pane right", "", Kind::Accel),
+                    f!("hotkeys", "pane_up", "Focus pane up", "", Kind::Accel),
+                    f!("hotkeys", "pane_down", "Focus pane down", "", Kind::Accel),
+                    f!("hotkeys", "zoom_pane", "Zoom pane", "", Kind::Accel),
+                    f!("hotkeys", "search", "Find in scrollback", "", Kind::Accel),
+                    f!("hotkeys", "zoom_in", "Larger text", "", Kind::Accel),
+                    f!("hotkeys", "zoom_out", "Smaller text", "", Kind::Accel),
+                    f!("hotkeys", "zoom_reset", "Reset text size", "", Kind::Accel),
                 ],
             },
             Group {
@@ -606,13 +706,7 @@ const PAGES: &[Page] = &[
                         "",
                         Kind::Accel
                     ),
-                    f!(
-                        "hotkeys",
-                        "copy",
-                        "Copy",
-                        "",
-                        Kind::Accel
-                    ),
+                    f!("hotkeys", "copy", "Copy", "", Kind::Accel),
                     f!(
                         "hotkeys",
                         "paste",
@@ -620,13 +714,7 @@ const PAGES: &[Page] = &[
                         "Shift+Insert always pastes too.",
                         Kind::Accel
                     ),
-                    f!(
-                        "hotkeys",
-                        "settings",
-                        "Open Settings",
-                        "",
-                        Kind::Accel
-                    ),
+                    f!("hotkeys", "settings", "Open Settings", "", Kind::Accel),
                     f!(
                         "hotkeys",
                         "open_config",
@@ -676,6 +764,7 @@ struct Ctx {
     pending: RefCell<Vec<Edit>>,
     timer: Cell<Option<gtk4::glib::SourceId>>,
     status: gtk4::Label,
+    win: Rc<MainWindow>,
 }
 
 impl Ctx {
@@ -691,15 +780,13 @@ impl Ctx {
             id.remove();
         }
         let this = Rc::downgrade(self);
-        let id = gtk4::glib::timeout_add_local_once(
-            std::time::Duration::from_millis(400),
-            move || {
+        let id =
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
                 if let Some(ctx) = this.upgrade() {
                     ctx.timer.set(None);
                     ctx.flush();
                 }
-            },
-        );
+            });
         self.timer.set(Some(id));
     }
 
@@ -751,7 +838,8 @@ fn build_row(ctx: &Rc<Ctx>, f: &'static Field) -> gtk4::ListBoxRow {
         })
     };
 
-    let (control, set): (gtk4::Widget, Rc<dyn Fn(Option<&toml::Value>)>) = match &f.kind {
+    type SetFn = Rc<dyn Fn(Option<&toml::Value>)>;
+    let (control, set): (gtk4::Widget, SetFn) = match &f.kind {
         Kind::Bool => {
             let sw = gtk4::Switch::new();
             sw.set_valign(gtk4::Align::Center);
@@ -869,7 +957,7 @@ fn build_row(ctx: &Rc<Ctx>, f: &'static Field) -> gtk4::ListBoxRow {
                 move || {
                     let text = entry.text().trim().to_string();
                     let ok = if is_accel {
-                        gtk4::accelerator_parse(&normalize_accel(&text)).is_some()
+                        gtk4::accelerator_parse(normalize_accel(&text)).is_some()
                     } else if is_size {
                         text.is_empty() || parse_size(&text).is_some()
                     } else {
@@ -973,6 +1061,50 @@ fn build_row(ctx: &Rc<Ctx>, f: &'static Field) -> gtk4::ListBoxRow {
     row
 }
 
+/// Read-only row under the global shortcut: what the desktop actually did
+/// with it, and the fallback that always works.
+fn hotkey_status_row(ctx: &Rc<Ctx>) -> gtk4::ListBoxRow {
+    let enabled = ctx.win.config().borrow().dropdown.enabled;
+    let text = if enabled {
+        ctx.win.hotkey_status().describe()
+    } else {
+        "Off: the drop-down is disabled in the config, so there is no global shortcut.".into()
+    };
+    let title = gtk4::Label::builder()
+        .label("Shortcut status")
+        .xalign(0.0)
+        .build();
+    let detail = gtk4::Label::builder()
+        .label(&text)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    detail.add_css_class("dim-label");
+    let tb = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    tb.set_hexpand(true);
+    tb.append(&title);
+    tb.append(&detail);
+    let copy = gtk4::Button::with_label("Copy fallback command");
+    copy.set_tooltip_text(Some(
+        "Bind this command to any key in your desktop's keyboard settings",
+    ));
+    copy.set_valign(gtk4::Align::Center);
+    let win = ctx.win.clone();
+    copy.connect_clicked(move |b| {
+        win.copy_toggle_command();
+        b.set_label("Copied: hashterm --toggle");
+    });
+    let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 16);
+    row_box.add_css_class("settings-row");
+    row_box.append(&tb);
+    row_box.append(&copy);
+    let row = gtk4::ListBoxRow::new();
+    row.set_activatable(false);
+    row.set_selectable(false);
+    row.set_child(Some(&row_box));
+    row
+}
+
 fn build_page(ctx: &Rc<Ctx>, page: &'static Page) -> gtk4::ScrolledWindow {
     let col = gtk4::Box::new(gtk4::Orientation::Vertical, 22);
     col.set_margin_top(20);
@@ -994,6 +1126,9 @@ fn build_page(ctx: &Rc<Ctx>, page: &'static Page) -> gtk4::ScrolledWindow {
         for field in group.fields {
             list.append(&build_row(ctx, field));
         }
+        if page.id == "keys" && group.title == "Global" {
+            list.append(&hotkey_status_row(ctx));
+        }
         section.append(&list);
         col.append(&section);
     }
@@ -1011,6 +1146,19 @@ thread_local! {
 }
 
 /// Open the Settings window (or raise it if it is already open).
+/// Config keys of every `[hotkeys]` row (the in-app action table is checked
+/// against this so a shortcut cannot exist without a Settings row).
+#[cfg(test)]
+pub(crate) fn hotkey_rows() -> Vec<&'static str> {
+    PAGES
+        .iter()
+        .flat_map(|p| p.groups.iter())
+        .flat_map(|g| g.fields.iter())
+        .filter(|f| f.section == "hotkeys")
+        .map(|f| f.key)
+        .collect()
+}
+
 pub fn open(win: &Rc<MainWindow>) {
     let existing = OPEN.with(|o| o.borrow().as_ref().and_then(|w| w.upgrade()));
     if let Some(w) = existing {
@@ -1018,8 +1166,10 @@ pub fn open(win: &Rc<MainWindow>) {
         return;
     }
 
-    let current = toml::Value::try_from(&*win.config().borrow()).unwrap_or(toml::Value::Table(Default::default()));
-    let defaults = toml::Value::try_from(Config::default()).unwrap_or(toml::Value::Table(Default::default()));
+    let current = toml::Value::try_from(&*win.config().borrow())
+        .unwrap_or(toml::Value::Table(Default::default()));
+    let defaults =
+        toml::Value::try_from(Config::default()).unwrap_or(toml::Value::Table(Default::default()));
 
     let status = gtk4::Label::builder()
         .label("Changes apply as you make them")
@@ -1035,6 +1185,7 @@ pub fn open(win: &Rc<MainWindow>) {
         pending: RefCell::new(Vec::new()),
         timer: Cell::new(None),
         status: status.clone(),
+        win: win.clone(),
     });
 
     let stack = gtk4::Stack::builder()

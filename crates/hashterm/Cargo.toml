@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 libc.workspace = true
 hashterm-core = { workspace = true }
+hashterm-platform = { workspace = true }
 hashterm-session = { workspace = true }
 hashterm-tmux = { workspace = true }
 hashterm-ui = { workspace = true }

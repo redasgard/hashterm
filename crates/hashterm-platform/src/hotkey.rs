@@ -18,23 +18,130 @@ pub enum HotkeySourceKind {
     External,
 }
 
+/// What the global hotkey is really doing right now (the portal answers
+/// asynchronously, so the first value is usually `Pending`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyStatus {
+    Pending,
+    Active {
+        source: HotkeySourceKind,
+        trigger: String,
+    },
+    /// The desktop itself runs `hashterm --toggle` for this key (a custom
+    /// shortcut in its keyboard settings): works, just not through hashterm.
+    External {
+        trigger: String,
+    },
+    /// Registered, but with a known limitation.
+    Degraded {
+        reason: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl HotkeyStatus {
+    /// One sentence for Settings, the log and `--doctor`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Pending => "Waiting for the desktop to confirm the shortcut…".into(),
+            Self::Active {
+                source: HotkeySourceKind::Portal,
+                trigger,
+            } => format!("Active through the desktop portal ({trigger})"),
+            Self::Active { trigger, .. } => format!("Active through an X11 key grab ({trigger})"),
+            Self::External { trigger } => format!(
+                "Active: your desktop runs `hashterm --toggle` on {trigger} (custom shortcut)"
+            ),
+            Self::Degraded { reason } => format!("Limited: {reason}"),
+            Self::Unavailable { reason } => format!(
+                "Not active: {reason}. Bind `hashterm --toggle` to a key in your \
+                 desktop's keyboard settings."
+            ),
+        }
+    }
+
+    /// Worth telling the user about unprompted.
+    pub fn needs_attention(&self) -> bool {
+        matches!(self, Self::Degraded { .. } | Self::Unavailable { .. })
+    }
+}
+
+/// The key of a GNOME custom shortcut whose command runs `hashterm --toggle`.
+/// Read-only; `None` on other desktops or when there is none.
+pub fn external_toggle_binding() -> Option<String> {
+    use gtk4::gio::prelude::*;
+    let src = gtk4::gio::SettingsSchemaSource::default()?;
+    let list_schema = "org.gnome.settings-daemon.plugins.media-keys";
+    let item_schema = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
+    src.lookup(list_schema, true)?;
+    src.lookup(item_schema, true)?;
+    let list = gtk4::gio::Settings::new(list_schema).strv("custom-keybindings");
+    list.iter().find_map(|path| {
+        let item = gtk4::gio::Settings::with_path(item_schema, path.as_str());
+        is_toggle_command(item.string("command").as_str())
+            .then(|| item.string("binding").to_string())
+            .filter(|b| !b.is_empty())
+    })
+}
+
+/// `hashterm --toggle`, with or without a path or extra flags.
+pub fn is_toggle_command(cmd: &str) -> bool {
+    let mut words = cmd.split_whitespace();
+    let bin = words.next().unwrap_or("");
+    (bin == "hashterm" || bin.ends_with("/hashterm")) && words.any(|w| w == "--toggle")
+}
+
+/// An X11 key grab only sees keys while an X11 client has focus when the
+/// session itself is Wayland (GNOME on Wayland runs hashterm under XWayland).
+pub fn x11_grab_status(session_type: Option<&str>, trigger: &str) -> HotkeyStatus {
+    if session_type == Some("wayland") {
+        HotkeyStatus::Degraded {
+            reason: "this is a Wayland session, so an X11 key grab only works while an X11 \
+                     window has focus"
+                .into(),
+        }
+    } else {
+        HotkeyStatus::Active {
+            source: HotkeySourceKind::X11Grab,
+            trigger: trigger.into(),
+        }
+    }
+}
+
+fn session_type() -> Option<String> {
+    std::env::var("XDG_SESSION_TYPE").ok()
+}
+
 /// Try portal first, then X11 grab; report what actually worked so the UI can
-/// show setup instructions for External.
+/// show setup instructions for External. `on_status` hears every change,
+/// including the asynchronous portal answer.
 pub fn register_toggle_hotkey(
     accel: &str,
     is_x11: bool,
     on_activate: Rc<dyn Fn()>,
+    on_status: Rc<dyn Fn(HotkeyStatus)>,
 ) -> HotkeySourceKind {
     // Portal binding is async (consent dialog); optimistically start it. If
     // the bind conclusively fails, the async path falls back to an X11 grab
-    // (X11 sessions) or logs external-bind instructions.
+    // (X11 sessions) or reports the key as unavailable.
     if portal_available() {
-        spawn_portal_bind(accel.to_owned(), is_x11, on_activate);
+        on_status(HotkeyStatus::Pending);
+        spawn_portal_bind(accel.to_owned(), is_x11, on_activate, on_status);
         return HotkeySourceKind::Portal;
     }
     if is_x11 && x11_grab(accel, on_activate) {
+        on_status(x11_grab_status(session_type().as_deref(), accel));
         return HotkeySourceKind::X11Grab;
     }
+    on_status(HotkeyStatus::Unavailable {
+        reason: if std::env::var_os("HASHTERM_NO_PORTAL").is_some() {
+            "the portal is disabled (HASHTERM_NO_PORTAL) and no X11 grab is possible".into()
+        } else {
+            "no desktop portal and no X11 session".into()
+        },
+    });
     HotkeySourceKind::External
 }
 
@@ -79,11 +186,18 @@ fn accel_to_portal_trigger(accel: &str) -> Option<String> {
 
 enum PortalMsg {
     Activated,
+    /// The desktop accepted the shortcut; carries its trigger description.
+    Bound(String),
     /// Bind failed or the activation stream ended: portal path is dead.
-    Failed,
+    Failed(String),
 }
 
-fn spawn_portal_bind(accel: String, is_x11: bool, on_activate: Rc<dyn Fn()>) {
+fn spawn_portal_bind(
+    accel: String,
+    is_x11: bool,
+    on_activate: Rc<dyn Fn()>,
+    on_status: Rc<dyn Fn(HotkeyStatus)>,
+) {
     // Portal futures are Send (zbus internal executor); results are forwarded
     // to the GTK main thread through an async channel.
     let (tx, rx) = async_channel::unbounded::<PortalMsg>();
@@ -94,7 +208,7 @@ fn spawn_portal_bind(accel: String, is_x11: bool, on_activate: Rc<dyn Fn()>) {
         .spawn(move || {
             if let Err(e) = async_io_block_on(portal_loop(trigger, tx.clone())) {
                 tracing::warn!("GlobalShortcuts portal failed: {e}");
-                let _ = tx.send_blocking(PortalMsg::Failed);
+                let _ = tx.send_blocking(PortalMsg::Failed(e.to_string()));
             }
         })
         .expect("spawn portal thread");
@@ -103,20 +217,55 @@ fn spawn_portal_bind(accel: String, is_x11: bool, on_activate: Rc<dyn Fn()>) {
         while let Ok(msg) = rx.recv().await {
             match msg {
                 PortalMsg::Activated => on_activate(),
-                PortalMsg::Failed => {
+                PortalMsg::Bound(desc) => {
+                    on_status(HotkeyStatus::Active {
+                        source: HotkeySourceKind::Portal,
+                        trigger: if desc.is_empty() { accel.clone() } else { desc },
+                    });
+                }
+                PortalMsg::Failed(why) => {
                     if is_x11 && x11_grab(&accel, on_activate.clone()) {
-                        tracing::info!("global hotkey fell back to X11 grab");
+                        tracing::info!("global hotkey fell back to X11 grab ({why})");
+                        on_status(x11_grab_status(session_type().as_deref(), &accel));
                     } else {
                         tracing::warn!(
-                            "no in-process global hotkey; bind `hashterm --toggle` \
+                            "no in-process global hotkey ({why}); bind `hashterm --toggle` \
                              to {accel} in your desktop's keyboard settings"
                         );
+                        on_status(HotkeyStatus::Unavailable {
+                            reason: format!("the portal refused it ({why})"),
+                        });
                     }
                     return;
                 }
             }
         }
     });
+}
+
+/// Does the GlobalShortcuts portal answer on the session bus? (`--doctor`;
+/// asks for the interface only, binds nothing.) Returns its version.
+pub fn probe_global_shortcuts_portal() -> Result<u32, String> {
+    if std::env::var_os("HASHTERM_NO_PORTAL").is_some() {
+        return Err("disabled by HASHTERM_NO_PORTAL".into());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("hashterm-doctor".into())
+        .spawn(move || {
+            let r: Result<u32, String> = async_io_block_on(async {
+                let g = ashpd::desktop::global_shortcuts::GlobalShortcuts::new()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(g.version())
+            });
+            let _ = tx.send(r);
+        });
+    if let Err(e) = spawned {
+        return Err(e.to_string());
+    }
+    rx.recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap_or_else(|_| Err("no answer within 3 s".into()))
 }
 
 fn async_io_block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -218,7 +367,18 @@ async fn portal_loop(
         .bind_shortcuts(&session, &[shortcut], None, Default::default())
         .await?;
     let bound = request.response()?;
+    if bound.shortcuts().is_empty() {
+        let _ = tx
+            .send(PortalMsg::Failed(
+                "the desktop did not grant the shortcut".into(),
+            ))
+            .await;
+        return Ok(());
+    }
     for s in bound.shortcuts() {
+        let _ = tx
+            .send(PortalMsg::Bound(s.trigger_description().to_string()))
+            .await;
         tracing::info!(
             "portal shortcut bound: {} -> {}",
             s.id(),
@@ -379,8 +539,48 @@ fn accel_to_hotkey(accel: &str) -> Option<global_hotkey::hotkey::HotKey> {
 #[cfg(test)]
 mod tests {
     // accel parsing needs GTK initialized; keep to pure-logic assertions.
+    use super::*;
+
     #[test]
     fn portal_probe_is_cheap() {
         let _ = super::portal_available();
+    }
+
+    #[test]
+    fn toggle_command_detection() {
+        assert!(is_toggle_command("hashterm --toggle"));
+        assert!(is_toggle_command("/usr/bin/hashterm --toggle"));
+        assert!(!is_toggle_command("hashterm"));
+        assert!(!is_toggle_command("echo hashterm --toggle"));
+        assert!(!is_toggle_command(""));
+    }
+
+    #[test]
+    fn x11_grab_on_a_wayland_session_is_degraded() {
+        assert!(x11_grab_status(Some("wayland"), "F12").needs_attention());
+        assert_eq!(
+            x11_grab_status(Some("x11"), "F12"),
+            HotkeyStatus::Active {
+                source: HotkeySourceKind::X11Grab,
+                trigger: "F12".into()
+            }
+        );
+        assert!(!x11_grab_status(None, "F12").needs_attention());
+    }
+
+    #[test]
+    fn status_text_tells_the_user_what_to_do() {
+        let un = HotkeyStatus::Unavailable { reason: "x".into() };
+        assert!(un.describe().contains("hashterm --toggle"));
+        assert!(un.needs_attention());
+        assert!(!HotkeyStatus::Pending.needs_attention());
+        assert!(
+            HotkeyStatus::Active {
+                source: HotkeySourceKind::Portal,
+                trigger: "F12".into()
+            }
+            .describe()
+            .contains("portal")
+        );
     }
 }

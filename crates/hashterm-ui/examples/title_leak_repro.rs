@@ -36,14 +36,18 @@ fn main() {
             vte4::Terminal::new()
         };
         win.set_child(Some(&vte));
-        win.show();
+        win.set_visible(true);
         // Mirror hashterm's page.rs wiring: consume each xterm.title change.
         {
             let vte2 = vte.clone();
             vte.connect_termprop_changed(Some("xterm.title"), move |t, prop| {
                 let _ = &vte2;
                 if let (Some(title), _) = t.termprop_string(prop) {
-                    let _clean: String = title.chars().filter(|c| !c.is_control()).take(256).collect();
+                    let _clean: String = title
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(256)
+                        .collect();
                 }
             });
         }
@@ -54,7 +58,11 @@ fn main() {
             // Grid damage every second -> real VTE renders (this is the case
             // the feed()-only repro never exercised).
             let argv: Vec<&str> = if std::env::var_os("HT_REPRO_DAMAGE").is_some() {
-                vec!["bash", "-c", "while true; do echo damage-$(date +%s); sleep 1; done"]
+                vec![
+                    "bash",
+                    "-c",
+                    "while true; do echo damage-$(date +%s); sleep 1; done",
+                ]
             } else {
                 vec!["bash"]
             };
@@ -90,7 +98,7 @@ fn glib_run_pty(vte: &vte4::Terminal, n: &std::cell::Cell<u64>) {
         let i = n.get();
         vte.feed_child(format!("\x1b]0;leak-pty-{}\x07", i).as_bytes());
         n.set(i + 1);
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             println!("pty titles={} rss={}", i, rss_kb());
         }
         if i >= 150 {
@@ -110,7 +118,7 @@ fn glib_run(vte: &vte4::Terminal, n: &std::cell::Cell<u64>) {
         let seq = format!("\x1b]0;leak-title-{}\x07", i);
         vte.feed(seq.as_bytes());
         n.set(i + 1);
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             println!("titles={} rss={}", i, rss_kb());
         }
         if i >= 150 {

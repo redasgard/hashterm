@@ -46,6 +46,47 @@ pub enum MonitorPick {
     Connector(String),
 }
 
+/// Desktop notifications for tabs that need you.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notifications {
+    pub enabled: bool,
+    /// A bell (printf '\\a', a finished build that rings) in a tab you are not looking at.
+    pub on_bell: bool,
+    /// Output in a background tab after 5 s of silence. Off by default: noisy.
+    pub on_activity: bool,
+    /// Skip the notification when you are already looking at that tab.
+    pub only_when_unseen: bool,
+    /// At most one notification per tab in this many seconds.
+    pub min_interval_secs: u32,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            on_bell: true,
+            on_activity: false,
+            only_when_unseen: true,
+            min_interval_secs: 10,
+        }
+    }
+}
+
+/// Clickable links in the terminal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Links {
+    /// Ctrl+click opens http(s) and mailto links (including OSC 8 hyperlinks).
+    pub enabled: bool,
+}
+
+impl Default for Links {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -60,6 +101,8 @@ pub struct Config {
     pub session: SessionCfg,
     pub restore: RestoreCfg,
     pub tmux: TmuxCfg,
+    pub links: Links,
+    pub notifications: Notifications,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +122,8 @@ pub struct General {
     pub start_hidden: bool,
     /// Maintain an XDG autostart entry so hashterm launches with the session.
     pub autostart: bool,
+    /// Keep a log file (~/.local/state/hashterm/hashterm.log) for bug reports.
+    pub log_to_file: bool,
 }
 
 impl Default for General {
@@ -91,6 +136,7 @@ impl Default for General {
             inherit_cwd: true,
             start_hidden: false,
             autostart: false,
+            log_to_file: true,
         }
     }
 }
@@ -116,6 +162,31 @@ pub struct Appearance {
     /// Terminal/window background color, "#rrggbb".
     pub background: String,
     pub bold_is_bright: bool,
+    /// Colour scheme: "default" (the colours above), a bundled name such as
+    /// "dracula", or the file stem of ~/.config/hashterm/schemes/NAME.toml.
+    pub scheme: String,
+    /// Pick `scheme_dark` / `scheme_light` by the desktop's light/dark setting.
+    pub follow_system: bool,
+    pub scheme_dark: String,
+    pub scheme_light: String,
+    /// "block" | "ibeam" | "underline".
+    pub cursor_shape: String,
+    pub cursor_blink: bool,
+}
+
+impl Appearance {
+    /// The colours to paint, after the scheme choice (see `scheme::resolve`).
+    pub fn resolved(&self) -> crate::scheme::Resolved {
+        crate::scheme::resolve(
+            &self.scheme,
+            self.follow_system,
+            &self.scheme_dark,
+            &self.scheme_light,
+            &self.foreground,
+            &self.background,
+            &Config::config_dir().join("schemes"),
+        )
+    }
 }
 
 impl Default for Appearance {
@@ -130,6 +201,12 @@ impl Default for Appearance {
             foreground: "#c5c8c6".into(),
             background: "#1d1f21".into(),
             bold_is_bright: true,
+            scheme: "default".into(),
+            follow_system: false,
+            scheme_dark: "tomorrow-night".into(),
+            scheme_light: "solarized-light".into(),
+            cursor_shape: "block".into(),
+            cursor_blink: true,
         }
     }
 }
@@ -147,6 +224,9 @@ pub struct TabBarCfg {
     pub reveal_on_badge: bool,
     /// Centered translucent popup with the tab name after switching tabs.
     pub switch_osd: bool,
+    /// Name tabs after the folder (or the running program) instead of the
+    /// host name that tmux uses as the default pane title.
+    pub auto_titles: bool,
 }
 
 impl Default for TabBarCfg {
@@ -159,6 +239,7 @@ impl Default for TabBarCfg {
             show_close: true,
             reveal_on_badge: true,
             switch_osd: true,
+            auto_titles: true,
         }
     }
 }
@@ -300,6 +381,22 @@ pub struct Hotkeys {
     /// Cycle tab groups (workspaces); the bar shows only the active group.
     pub next_group: String,
     pub prev_group: String,
+    /// Start a new group (workspace) with a fresh tab.
+    pub new_group: String,
+    /// Split the tab into tmux panes, move between them, zoom one.
+    pub split_right: String,
+    pub split_down: String,
+    pub pane_left: String,
+    pub pane_right: String,
+    pub pane_up: String,
+    pub pane_down: String,
+    pub zoom_pane: String,
+    /// Find in the scrollback (tmux copy-mode search).
+    pub search: String,
+    /// Font size: bigger / smaller / back to the configured size (this window only).
+    pub zoom_in: String,
+    pub zoom_out: String,
+    pub zoom_reset: String,
 }
 
 impl Default for Hotkeys {
@@ -319,6 +416,18 @@ impl Default for Hotkeys {
             goto_tab_modifier: "<Alt>".into(),
             next_group: "<Ctrl>Page_Down".into(),
             prev_group: "<Ctrl>Page_Up".into(),
+            new_group: "<Ctrl><Shift>n".into(),
+            split_right: "<Ctrl><Shift>e".into(),
+            split_down: "<Ctrl><Shift>o".into(),
+            pane_left: "<Alt><Shift>Left".into(),
+            pane_right: "<Alt><Shift>Right".into(),
+            pane_up: "<Alt><Shift>Up".into(),
+            pane_down: "<Alt><Shift>Down".into(),
+            zoom_pane: "<Ctrl><Shift>x".into(),
+            search: "<Ctrl><Shift>f".into(),
+            zoom_in: "<Ctrl><Shift>plus".into(),
+            zoom_out: "<Ctrl>minus".into(),
+            zoom_reset: "<Ctrl>0".into(),
         }
     }
 }
@@ -436,6 +545,32 @@ pub struct TmuxCfg {
     pub native_windows: bool,
     /// Extra conf sourced after the bundled one.
     pub extra_conf: Option<PathBuf>,
+}
+
+/// Order- and case-insensitive identity of an accelerator, for conflict
+/// detection: "<Shift><Ctrl>N" and "<Ctrl><Shift>n" are the same key. `None`
+/// for an empty (disabled) accelerator. Pure: no GTK needed.
+pub fn canonical_accel(accel: &str) -> Option<String> {
+    let norm = normalize_accel(accel.trim());
+    if norm.is_empty() {
+        return None;
+    }
+    let split = norm.rfind('>').map(|i| i + 1).unwrap_or(0);
+    let (mods, key) = norm.split_at(split);
+    let mut mods: Vec<String> = mods
+        .split('<')
+        .filter_map(|m| m.strip_suffix('>'))
+        .map(|m| match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" | "primary" => "ctrl".to_string(),
+            "alt" | "mod1" => "alt".to_string(),
+            "shift" => "shift".to_string(),
+            "super" | "mod4" => "super".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    mods.sort();
+    mods.dedup();
+    Some(format!("{}|{}", mods.join("+"), key.to_ascii_lowercase()))
 }
 
 /// Humanize accelerator strings: users type "<Ctrl><Shift>`" but GTK only
@@ -560,6 +695,21 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_accels_ignore_order_and_case() {
+        assert_eq!(
+            canonical_accel("<Shift><Ctrl>N"),
+            canonical_accel("<Ctrl><Shift>n")
+        );
+        assert_eq!(
+            canonical_accel("<Control>grave"),
+            canonical_accel("<Ctrl>`")
+        );
+        assert_ne!(canonical_accel("<Ctrl>n"), canonical_accel("<Alt>n"));
+        assert_eq!(canonical_accel(""), None);
+        assert_eq!(canonical_accel("  "), None);
+    }
+
     use super::*;
 
     #[test]

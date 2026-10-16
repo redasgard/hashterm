@@ -137,7 +137,8 @@ pub struct ProcScan {
 impl ProcScan {
     pub fn new() -> Self {
         let listen = listening_by_inode();
-        let mut by_pgid: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        let mut by_pgid: std::collections::HashMap<u32, Vec<u32>> =
+            std::collections::HashMap::new();
         if !listen.is_empty()
             && let Ok(entries) = std::fs::read_dir("/proc")
         {

@@ -51,6 +51,27 @@ cargo build --release
   live-reloaded on save, so you can still hand-edit or keep it in your
   dotfiles. Hotkey conflicts are detected and surfaced on-screen instead of
   silently picking a winner.
+- **Splits** — a tab can hold several panes. tmux draws them, so they survive
+  a crash and come back on restore. The tab's ✕ closes the whole tab and asks
+  first when it holds more than one pane.
+- **Search and links** — `Ctrl+Shift+F` searches the whole tmux scrollback
+  (lowercase ignores case, the bar shows the match count). `Ctrl+click` opens
+  `http`, `https` and `mailto` links, including hyperlinks programs print; hover
+  with Ctrl held to see where a link really goes. Other schemes are refused.
+- **Colour schemes** — twelve bundled (`scheme = "dracula"` …), your own in
+  `~/.config/hashterm/schemes/`, optional switching with the desktop's
+  light/dark setting; tmux's copy-mode colours follow the scheme.
+- **Tabs named for what they are** — a tab shows its folder (or `vim · shop`
+  while a program runs) instead of the host name, follows `cd`, and yields to
+  any title a program sets itself or you give it (`[tabbar] auto_titles`).
+  Tab and group chrome is derived from your terminal colours, so it stays
+  readable on any GTK theme.
+- **Tells you when something is off** — `hashterm --doctor` checks tmux, the
+  hotkey portal, the config and the log in one screen (`--doctor --log` adds
+  the last log lines). A global hotkey the desktop refused or limited is shown
+  in Settings and once on screen, with the always-working fallback
+  `hashterm --toggle`. A log file is kept in `~/.local/state/hashterm/`
+  (`[general] log_to_file`).
 - **Small touches** — per-tab names and accent colors, switch OSD toasts,
   auto-hiding tab bar on any edge, separate terminal/tab-bar/window opacity,
   `Ctrl+Alt+Shift`+scroll live window transparency (remembered across
@@ -139,6 +160,8 @@ sudo apt install ./dist/hashterm_*.deb
 ```
 
 Runtime dependencies: GTK 4 (≥ 4.18), VTE4 (≥ 0.80), gtk4-layer-shell, tmux.
+Styling hint: `~/.config/hashterm/user.css` is loaded on top of the built-in
+style at user priority.
 
 ### Building from source
 
@@ -153,9 +176,17 @@ cargo build --release          # needs Rust 1.90+
 | Key | Action |
 | --- | --- |
 | `F12` | toggle the drop-down (global) |
-| `Ctrl+Shift+T` / `Ctrl+Shift+W` | new / close tab |
+| `Ctrl+Shift+T` | new tab |
 | `Ctrl+Home` / `Ctrl+End` | previous / next terminal in the group |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next group |
+| `Ctrl+Shift+N` | new group (a second row of tabs) |
+| `Ctrl+Shift+E` / `Ctrl+Shift+O` | split the tab right / down (tmux panes, same folder) |
+| `Alt+Shift+arrows` | move between panes |
+| `Ctrl+Shift+X` | zoom the active pane |
+| `Ctrl+Shift+W` | close the active pane, then the tab |
+| `Ctrl+Shift+F` | find in the scrollback (Enter / Shift+Enter move, Esc closes) |
+| `Ctrl+Shift+plus` / `Ctrl+minus` / `Ctrl+0` | text bigger / smaller / reset (this window only) |
+| `Ctrl+click` | open the link under the pointer |
 | `Alt+1..0` | jump to tab 1–10 |
 | `Ctrl+Shift+B` | show/hide the tab bar |
 | `Ctrl+Shift+S` | session picker (save / restore) |

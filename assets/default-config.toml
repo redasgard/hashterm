@@ -24,6 +24,9 @@ start_hidden = false
 # Keep an XDG autostart entry (~/.config/autostart/) in sync with this flag,
 # so hashterm starts with your desktop session.
 autostart = false
+# Keep a log file for bug reports: ~/.local/state/hashterm/hashterm.log
+# (rotated at 2 MiB, never contains terminal content).
+log_to_file = true
 
 [appearance]
 font = "monospace 11"
@@ -43,6 +46,19 @@ tab_border_width = 2
 foreground = "#c5c8c6"
 background = "#1d1f21"
 bold_is_bright = true
+# Colour scheme. "default" uses foreground/background above. Bundled:
+# tomorrow-night, dracula, nord, solarized-dark, solarized-light, gruvbox-dark,
+# gruvbox-light, catppuccin-mocha, catppuccin-latte, tokyo-night, one-half-dark,
+# atom-one-light. Your own: ~/.config/hashterm/schemes/NAME.toml -> scheme = "NAME".
+# A foreground/background you change above still wins over the scheme.
+scheme = "default"
+# Follow the desktop's light/dark setting with the two schemes below.
+follow_system = false
+scheme_dark = "tomorrow-night"
+scheme_light = "solarized-light"
+# Cursor: "block" | "ibeam" | "underline".
+cursor_shape = "block"
+cursor_blink = true
 
 [tabbar]
 # Where the tab bar lives: "top" | "bottom" | "left" | "right".
@@ -60,6 +76,9 @@ show_close = true
 reveal_on_badge = true
 # Centered translucent popup showing "name · 2/3" after switching tabs.
 switch_osd = true
+# Name tabs after the folder (or the running program) instead of the host
+# name. A title a program sets itself always wins; a renamed tab is untouched.
+auto_titles = true
 
 [groupbar]
 # The tab MATRIX: groups (workspaces) on one edge, the active group's tabs on
@@ -153,6 +172,23 @@ goto_tab_modifier = "<Alt>"
 # edge. Manage groups via the group bar or a tab's right-click menu.
 next_group = "<Ctrl>Page_Down"
 prev_group = "<Ctrl>Page_Up"
+# New group (workspace) with a fresh tab.
+new_group = "<Ctrl><Shift>n"
+# Panes (tmux draws them; they survive crashes). Ctrl+Shift+W closes the active
+# pane first, then the tab. Alt+arrows alone are left to readline.
+split_right = "<Ctrl><Shift>e"
+split_down = "<Ctrl><Shift>o"
+pane_left = "<Alt><Shift>Left"
+pane_right = "<Alt><Shift>Right"
+pane_up = "<Alt><Shift>Up"
+pane_down = "<Alt><Shift>Down"
+zoom_pane = "<Ctrl><Shift>x"
+# Find in the scrollback (Enter / Shift+Enter move, Esc closes).
+search = "<Ctrl><Shift>f"
+# Font size for this window (not saved): bigger, smaller, back to configured.
+zoom_in = "<Ctrl><Shift>plus"
+zoom_out = "<Ctrl>minus"
+zoom_reset = "<Ctrl>0"
 
 [session]
 # Full dump (layout + cwds + scrollback) every N seconds; 0 disables.
@@ -222,3 +258,20 @@ skuld = ["skuld", "swarm", "--resume"]           # Skuldkore: resume the workspa
 native_windows = false
 # Sourced after the bundled tmux config on the dedicated server.
 # extra_conf = "/home/you/.config/hashterm/extra.tmux.conf"
+
+[links]
+# Ctrl+click opens http(s) and mailto links in the default browser. A plain
+# click still reaches tmux/your program. Hover with Ctrl held to see the target.
+enabled = true
+
+[notifications]
+# Tell the desktop when a tab you are not looking at needs you. Clicking the
+# notification shows hashterm on that tab. The tab and its group always light
+# up regardless; these switches only control the desktop notification.
+enabled = true
+on_bell = true
+# Output in a background tab after 5 s of silence. Noisy, so off by default.
+on_activity = false
+# Don't notify for the tab you are looking at.
+only_when_unseen = true
+min_interval_secs = 10

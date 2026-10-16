@@ -1,0 +1,11 @@
+# Gruvbox Light — palette from mbadolato/iTerm2-Color-Schemes (MIT); see README.md in this directory.
+name = "Gruvbox Light"
+dark = false
+foreground = "#3c3836"
+background = "#fbf1c7"
+cursor = "#3c3836"
+selection = "#3c3836"
+palette = [
+  "#fbf1c7", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#7c6f64",
+  "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71", "#427b58", "#3c3836",
+]

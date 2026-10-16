@@ -1,4 +1,6 @@
-/* hashterm base stylesheet (APPLICATION priority).
+/* hashterm base stylesheet (APPLICATION priority): LAYOUT only. Every chrome
+   colour (tab bar, group bar, tab and group states, badges) is generated from
+   the terminal palette by crates/hashterm-ui/src/chrome.rs.
    User overrides: ~/.config/hashterm/user.css (USER priority). */
 
 /* The window node itself is TRANSPARENT: everything visible is painted on
@@ -36,7 +38,6 @@ window.hashterm.dropdown.edge-right .console-body {
 }
 
 .tabbar {
-  background-color: #16181a;
   padding: 2px;
 }
 
@@ -47,19 +48,12 @@ window.hashterm.dropdown.edge-right .console-body {
 
 /* Group bar: the matrix's second axis, perpendicular to the tab bar. */
 .groupbar {
-  background-color: #101214;
   padding: 2px;
 }
 
 .group-row {
   padding: 3px 10px;
   border-radius: 6px;
-  color: #9da0a3;
-}
-
-.group-row:checked {
-  background-color: #2b2f33;
-  color: #ffffff;
 }
 
 .group-row.drag-over,
@@ -116,24 +110,6 @@ window.hashterm.dropdown.edge-right .console-body {
 .tab {
   padding: 3px 10px;
   border-radius: 6px;
-  color: #b4b7ba;
-}
-
-.tab:checked {
-  background-color: #2b2f33;
-  color: #ffffff;
-}
-
-.tab.bell {
-  color: #e5c07b;
-}
-
-.tab.activity {
-  color: #61afef;
-}
-
-.tab.external {
-  color: #98c379;
 }
 
 /* ---- Settings window ---------------------------------------------------- */
@@ -173,4 +149,33 @@ window.hashterm.dropdown.edge-right .console-body {
 }
 .group-close:hover {
   background-color: alpha(currentColor, 0.18);
+}
+
+/* One-time guidance strip (colours are generated from the palette). */
+.notice {
+  font-size: 110%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+.notice button {
+  padding: 2px 10px;
+  border-radius: 6px;
+  min-height: 0;
+}
+
+/* Find bar (colours come from the generated chrome layer). */
+.search-bar {
+  padding: 6px 8px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+.search-bar button {
+  min-width: 0;
+  min-height: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+.search-status {
+  font-size: 90%;
 }

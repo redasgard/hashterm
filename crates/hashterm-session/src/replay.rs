@@ -29,13 +29,11 @@ fn resolve_allowed(arg0: &str) -> Option<PathBuf> {
         PathBuf::from(arg0)
     } else {
         // Bare name: emulate PATH search so we validate what execvp would run.
-        std::env::var_os("PATH")
-            .map(|path| {
-                std::env::split_paths(&path)
-                    .map(|d| d.join(arg0))
-                    .find(|p| p.is_file())
-            })?
-            ?
+        std::env::var_os("PATH").map(|path| {
+            std::env::split_paths(&path)
+                .map(|d| d.join(arg0))
+                .find(|p| p.is_file())
+        })??
     };
     let real = std::fs::canonicalize(candidate).ok()?;
     let in_system = EXEC_ALLOW.iter().any(|dir| real.starts_with(dir));
@@ -47,7 +45,9 @@ fn resolve_allowed(arg0: &str) -> Option<PathBuf> {
     // group/world-writable — that rejects a payload dropped with loose modes.
     if in_home && !in_system {
         use std::os::unix::fs::MetadataExt;
-        let writable = std::fs::metadata(&real).map(|m| m.mode() & 0o022 != 0).unwrap_or(true);
+        let writable = std::fs::metadata(&real)
+            .map(|m| m.mode() & 0o022 != 0)
+            .unwrap_or(true);
         if writable {
             return None;
         }

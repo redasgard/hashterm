@@ -50,13 +50,13 @@ impl Styles {
         let a = &config.appearance;
         let alpha = a.opacity.clamp(0.05, 1.0);
         let bar_alpha = a.tabbar_opacity.clamp(0.0, 1.0);
-        let (r, g, b) = parse_hex(&a.background).unwrap_or((0x1d, 0x1f, 0x21));
-        // Tab bar sits slightly darker than the terminal, own alpha.
-        let (tr, tg, tb) = (
-            r.saturating_sub(7),
-            g.saturating_sub(7),
-            b.saturating_sub(7),
-        );
+        let resolved = a.resolved();
+        let bg = parse_hex(&resolved.background).unwrap_or((0x1d, 0x1f, 0x21));
+        let fg = parse_hex(&resolved.foreground).unwrap_or((0xc5, 0xc8, 0xc6));
+        let (r, g, b) = bg;
+        // Tab / group chrome colours come from ONE derivation (chrome.rs) so
+        // every state stays legible on any GTK theme and terminal palette.
+        let chrome = crate::chrome::ChromeTokens::derive(bg, fg).css(bar_alpha);
         // The background lives on .console-body — the widget the SlidePanel
         // translates — NOT on the window node. A window-node background stays
         // put while the content slides, which broke the quake illusion (the
@@ -64,8 +64,8 @@ impl Styles {
         let css = format!(
             "window.hashterm {{ background: transparent; }}\n\
              .console-body {{ background-color: rgba({r},{g},{b},{alpha}); }}\n\
-             .tabbar {{ background-color: rgba({tr},{tg},{tb},{bar_alpha}); }}\n\
-             .terminal-page {{ padding: {}px; background: transparent; }}\n",
+             .terminal-page {{ padding: {}px; background: transparent; }}\n\
+             {chrome}",
             a.padding
         );
         self.generated.load_from_string(&css);

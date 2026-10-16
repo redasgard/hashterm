@@ -34,6 +34,8 @@ pub struct UiState {
     /// Runtime whole-window opacity set via Ctrl+Alt+Shift+scroll; overrides
     /// appearance.window_opacity until that config value itself is edited.
     pub window_opacity: Option<f64>,
+    /// One-time hints the user has dismissed (e.g. "welcome").
+    pub hints_seen: Vec<String>,
 }
 
 fn data_dir() -> PathBuf {
@@ -61,7 +63,10 @@ fn ensure_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
     if dir.is_dir() {
         return Ok(());
     }
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
 }
 
 /// Write `data` to `p` as a 0600 regular file, refusing to follow a symlink
@@ -144,6 +149,7 @@ mod tests {
             group_order: vec!["main".into(), "work".into()],
             last_active_tab: [("work".into(), "ht-1".into())].into(),
             window_opacity: Some(0.85),
+            hints_seen: vec!["welcome".into()],
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: UiState = serde_json::from_str(&json).unwrap();

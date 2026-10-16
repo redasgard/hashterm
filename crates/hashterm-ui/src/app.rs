@@ -172,6 +172,10 @@ fn ensure_window(
         win.initial_present();
     }
     *window.borrow_mut() = Some(win.clone());
+    {
+        let (styles, config) = (styles.clone(), config.clone());
+        win.set_restyle(Rc::new(move || styles.apply(&config.borrow())));
+    }
 
     // Debug aid: HASHTERM_SHOT=/path.png renders the window content to a PNG
     // (offscreen GSK render of the widget tree) 3s after startup. Debug-only:
@@ -286,6 +290,14 @@ fn wire_global_hotkey(
                 w.toggle_dropdown_from("portal-or-grab");
             }
         }),
+        {
+            let this = Rc::downgrade(win);
+            Rc::new(move |status| {
+                if let Some(w) = this.upgrade() {
+                    w.set_hotkey_status(status);
+                }
+            })
+        },
     );
     tracing::info!("global hotkey source: {kind:?}");
     if kind == hashterm_platform::HotkeySourceKind::External {
@@ -405,91 +417,306 @@ fn build_controller(config: &Config) -> std::io::Result<TmuxController> {
     if let Some(tool) = hashterm_tmux::conf::clipboard_tool() {
         let _ = ctl.run(&["set-option", "-s", "copy-command", tool]);
     }
+    let _ = ctl.ensure_hyperlinks();
     Ok(ctl)
 }
 
-type WindowAction = Box<dyn Fn(&Rc<MainWindow>)>;
+/// One window action: its GAction name, the `[hotkeys]` key that binds it,
+/// and what it does. The single table drives action registration, accelerator
+/// installation, conflict detection, and the test that every shortcut has a
+/// Settings row.
+struct ActionDef {
+    name: &'static str,
+    /// `[hotkeys]` key.
+    key: &'static str,
+    accel: fn(&hashterm_core::config::Hotkeys) -> &String,
+    /// Accelerators that always work in addition to the configured one.
+    extra: &'static [&'static str],
+    /// false = bound system-wide by the platform layer, not as an in-app accel.
+    in_app: bool,
+    run: fn(&Rc<MainWindow>),
+}
+
+const ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        name: "new-tab",
+        key: "new_tab",
+        accel: |h| &h.new_tab,
+        extra: &[],
+        in_app: true,
+        run: |w| w.new_tab(),
+    },
+    ActionDef {
+        name: "close-tab",
+        key: "close_tab",
+        accel: |h| &h.close_tab,
+        extra: &[],
+        in_app: true,
+        run: |w| w.close_active_tab(),
+    },
+    ActionDef {
+        name: "next-tab",
+        key: "next_tab",
+        accel: |h| &h.next_tab,
+        extra: &[],
+        in_app: true,
+        run: |w| w.cycle_tab(true),
+    },
+    ActionDef {
+        name: "prev-tab",
+        key: "prev_tab",
+        accel: |h| &h.prev_tab,
+        extra: &[],
+        in_app: true,
+        run: |w| w.cycle_tab(false),
+    },
+    ActionDef {
+        name: "toggle-tabbar",
+        key: "toggle_tabbar",
+        accel: |h| &h.toggle_tabbar,
+        extra: &[],
+        in_app: true,
+        run: |w| w.toggle_tabbar(),
+    },
+    ActionDef {
+        name: "toggle-dropdown",
+        key: "toggle_dropdown",
+        accel: |h| &h.toggle_dropdown,
+        extra: &[],
+        in_app: false,
+        run: |w| w.toggle_dropdown_from("action"),
+    },
+    ActionDef {
+        name: "sessions",
+        key: "session_picker",
+        accel: |h| &h.session_picker,
+        extra: &[],
+        in_app: true,
+        run: crate::picker::open,
+    },
+    ActionDef {
+        name: "settings",
+        key: "settings",
+        accel: |h| &h.settings,
+        extra: &[],
+        in_app: true,
+        run: crate::settings::open,
+    },
+    ActionDef {
+        name: "open-config",
+        key: "open_config",
+        accel: |h| &h.open_config,
+        extra: &[],
+        in_app: true,
+        run: open_config_file,
+    },
+    ActionDef {
+        name: "copy",
+        key: "copy",
+        accel: |h| &h.copy,
+        extra: &[],
+        in_app: true,
+        run: |w| w.copy_selection(),
+    },
+    ActionDef {
+        name: "paste",
+        key: "paste",
+        accel: |h| &h.paste,
+        // Shift+Insert is muscle memory for terminal paste everywhere.
+        extra: &["<Shift>Insert"],
+        in_app: true,
+        run: |w| w.paste_clipboard(),
+    },
+    ActionDef {
+        name: "next-group",
+        key: "next_group",
+        accel: |h| &h.next_group,
+        extra: &[],
+        in_app: true,
+        run: |w| w.cycle_group(true),
+    },
+    ActionDef {
+        name: "prev-group",
+        key: "prev_group",
+        accel: |h| &h.prev_group,
+        extra: &[],
+        in_app: true,
+        run: |w| w.cycle_group(false),
+    },
+    ActionDef {
+        name: "new-group",
+        key: "new_group",
+        accel: |h| &h.new_group,
+        extra: &[],
+        in_app: true,
+        run: |w| w.new_group_with_tab(),
+    },
+    ActionDef {
+        name: "split-right",
+        key: "split_right",
+        accel: |h| &h.split_right,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_split(true),
+    },
+    ActionDef {
+        name: "split-down",
+        key: "split_down",
+        accel: |h| &h.split_down,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_split(false),
+    },
+    ActionDef {
+        name: "pane-left",
+        key: "pane_left",
+        accel: |h| &h.pane_left,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_focus(hashterm_tmux::panes::Dir::Left),
+    },
+    ActionDef {
+        name: "pane-right",
+        key: "pane_right",
+        accel: |h| &h.pane_right,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_focus(hashterm_tmux::panes::Dir::Right),
+    },
+    ActionDef {
+        name: "pane-up",
+        key: "pane_up",
+        accel: |h| &h.pane_up,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_focus(hashterm_tmux::panes::Dir::Up),
+    },
+    ActionDef {
+        name: "pane-down",
+        key: "pane_down",
+        accel: |h| &h.pane_down,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_focus(hashterm_tmux::panes::Dir::Down),
+    },
+    ActionDef {
+        name: "zoom-pane",
+        key: "zoom_pane",
+        accel: |h| &h.zoom_pane,
+        extra: &[],
+        in_app: true,
+        run: |w| w.pane_zoom(),
+    },
+    ActionDef {
+        name: "search",
+        key: "search",
+        accel: |h| &h.search,
+        extra: &[],
+        in_app: true,
+        run: |w| w.open_search(),
+    },
+    ActionDef {
+        name: "zoom-in",
+        key: "zoom_in",
+        accel: |h| &h.zoom_in,
+        // Ctrl+= is Ctrl+plus without Shift on most layouts.
+        extra: &["<Ctrl>equal", "<Ctrl>KP_Add"],
+        in_app: true,
+        run: |w| w.zoom(0.1),
+    },
+    ActionDef {
+        name: "zoom-out",
+        key: "zoom_out",
+        accel: |h| &h.zoom_out,
+        extra: &[],
+        in_app: true,
+        run: |w| w.zoom(-0.1),
+    },
+    ActionDef {
+        name: "zoom-reset",
+        key: "zoom_reset",
+        accel: |h| &h.zoom_reset,
+        extra: &[],
+        in_app: true,
+        run: |w| w.zoom(0.0),
+    },
+];
 
 fn register_actions(app: &gtk4::Application, window: &Rc<RefCell<Option<Rc<MainWindow>>>>) {
-    let acts: [(&str, WindowAction); 13] = [
-        ("new-tab", Box::new(|w| w.new_tab())),
-        ("close-tab", Box::new(|w| w.close_active_tab())),
-        ("next-tab", Box::new(|w| w.cycle_tab(true))),
-        ("prev-tab", Box::new(|w| w.cycle_tab(false))),
-        ("toggle-tabbar", Box::new(|w| w.toggle_tabbar())),
-        (
-            "toggle-dropdown",
-            Box::new(|w| w.toggle_dropdown_from("action")),
-        ),
-        ("sessions", Box::new(crate::picker::open)),
-        ("settings", Box::new(crate::settings::open)),
-        ("open-config", Box::new(open_config_file)),
-        ("copy", Box::new(|w| w.copy_selection())),
-        ("paste", Box::new(|w| w.paste_clipboard())),
-        ("next-group", Box::new(|w| w.cycle_group(true))),
-        ("prev-group", Box::new(|w| w.cycle_group(false))),
-    ];
-    for (name, f) in acts {
-        let action = gio::SimpleAction::new(name, None);
+    for def in ACTIONS {
+        let action = gio::SimpleAction::new(def.name, None);
         let window = window.clone();
+        let run = def.run;
         action.connect_activate(move |_, _| {
             if let Some(w) = window.borrow().as_ref() {
-                f(w);
+                run(w);
             }
         });
         app.add_action(&action);
     }
+    // Notification click: show the console on that tab.
+    let show_tab = gio::SimpleAction::new("show-tab", Some(glib::VariantTy::STRING));
+    let window = window.clone();
+    show_tab.connect_activate(move |_, param| {
+        if let (Some(w), Some(session)) = (
+            window.borrow().as_ref(),
+            param.and_then(|p| p.get::<String>()),
+        ) {
+            w.show_tab(&session);
+        }
+    });
+    app.add_action(&show_tab);
+}
+
+/// `(action, other action, accel text)` for every pair bound to the same key.
+/// Accels are compared as parsed (key, modifiers), so `<Shift><Ctrl>n` and
+/// `<Ctrl><Shift>N` collide; an empty accel (disabled) never does.
+fn find_conflicts(pairs: &[(String, String)]) -> Vec<(String, String, String)> {
+    use hashterm_core::config::canonical_accel as canon;
+    let mut out = Vec::new();
+    for (i, (action, accel)) in pairs.iter().enumerate() {
+        let Some(key) = canon(accel) else {
+            continue;
+        };
+        for (other, other_accel) in &pairs[i + 1..] {
+            if canon(other_accel).as_deref() == Some(key.as_str()) {
+                let strip = |a: &str| a.trim_start_matches("app.").to_owned();
+                out.push((strip(action), strip(other), accel.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// Returns a short human-readable description of the first hotkey conflict
 /// (for the OSD), if any.
 fn apply_accels(app: &gtk4::Application, config: &Config) -> Option<String> {
     use hashterm_core::config::normalize_accel;
-    let hk = &config.hotkeys;
-    let pairs = [
-        ("app.new-tab", &hk.new_tab),
-        ("app.close-tab", &hk.close_tab),
-        ("app.next-tab", &hk.next_tab),
-        ("app.prev-tab", &hk.prev_tab),
-        ("app.toggle-tabbar", &hk.toggle_tabbar),
-        ("app.sessions", &hk.session_picker),
-        ("app.settings", &hk.settings),
-        ("app.open-config", &hk.open_config),
-        ("app.copy", &hk.copy),
-        ("app.paste", &hk.paste),
-        ("app.next-group", &hk.next_group),
-        ("app.prev-group", &hk.prev_group),
-    ];
+    let pairs: Vec<(String, String)> = ACTIONS
+        .iter()
+        .filter(|d| d.in_app)
+        .map(|d| (d.key.to_string(), (d.accel)(&config.hotkeys).clone()))
+        .collect();
     // Two actions on one accel = only one of them fires (GTK picks silently).
     // Classic trigger: a config written before a default changed pins the old
     // key that a NEW default now also uses. Surface it instead of guessing.
     let mut conflict = None;
-    for (i, (action, accel)) in pairs.iter().enumerate() {
-        let norm = normalize_accel(accel);
-        for (other, other_accel) in &pairs[i + 1..] {
-            if normalize_accel(other_accel) == norm {
-                tracing::warn!(
-                    "hotkey conflict: '{accel}' is bound to both {action} and {other} — \
-                     only one will fire; change one of them in [hotkeys]"
-                );
-                conflict.get_or_insert_with(|| {
-                    let strip = |a: &str| a.trim_start_matches("app.").to_owned();
-                    format!(
-                        "Hotkey conflict: '{accel}' is bound to both {} and {}",
-                        strip(action),
-                        strip(other)
-                    )
-                });
-            }
-        }
+    for (action, other, accel) in find_conflicts(&pairs) {
+        tracing::warn!(
+            "hotkey conflict: '{accel}' is bound to both {action} and {other} — \
+             only one will fire; change one of them in [hotkeys]"
+        );
+        conflict.get_or_insert_with(|| {
+            format!("Hotkey conflict: '{accel}' is bound to both {action} and {other}")
+        });
     }
-    for (action, accel) in pairs {
-        if action == "app.paste" {
-            // Shift+Insert is muscle memory for terminal paste everywhere.
-            app.set_accels_for_action(action, &[&normalize_accel(accel), "<Shift>Insert"]);
-        } else {
-            app.set_accels_for_action(action, &[&normalize_accel(accel)]);
-        }
+    for def in ACTIONS.iter().filter(|d| d.in_app) {
+        // An empty accel is how a shortcut is switched off.
+        let own = normalize_accel((def.accel)(&config.hotkeys));
+        let mut accels = if own.is_empty() { vec![] } else { vec![own] };
+        accels.extend(def.extra.iter().map(|a| a.to_string()));
+        let refs: Vec<&str> = accels.iter().map(String::as_str).collect();
+        app.set_accels_for_action(&format!("app.{}", def.name), &refs);
     }
     conflict
 }
@@ -665,6 +892,27 @@ fn wire_autosave(config: &Rc<RefCell<Config>>, win: &Rc<MainWindow>) {
 
 #[cfg(test)]
 mod tests {
+    use super::find_conflicts;
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn conflicts_compare_parsed_keys_and_skip_disabled_ones() {
+        let c = find_conflicts(&pairs(&[
+            ("a", "<Shift><Ctrl>n"),
+            ("b", "<Ctrl><Shift>n"),
+            ("c", ""),
+            ("d", ""),
+            ("e", "<Ctrl>t"),
+        ]));
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].0.as_str(), c[0].1.as_str()), ("a", "b"));
+    }
+
     use super::sanitize_remote_args;
 
     fn v(a: &[&str]) -> Vec<String> {
@@ -692,5 +940,47 @@ mod tests {
             sanitize_remote_args(&v(&["hashterm", "--toggle"])),
             v(&["hashterm", "--toggle"])
         );
+    }
+}
+
+#[cfg(test)]
+mod action_table_tests {
+    use super::*;
+
+    #[test]
+    fn every_hotkey_has_exactly_one_action_and_a_settings_row() {
+        let table = toml::Value::try_from(hashterm_core::config::Hotkeys::default()).unwrap();
+        let mut keys: Vec<&str> = table
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            // A modifier for "jump to tab N", not a single action.
+            .filter(|k| *k != "goto_tab_modifier")
+            .collect();
+        keys.sort_unstable();
+        let mut actions: Vec<&str> = ACTIONS.iter().map(|d| d.key).collect();
+        actions.sort_unstable();
+        assert_eq!(keys, actions, "[hotkeys] keys vs the action table");
+
+        let rows = crate::settings::hotkey_rows();
+        for k in &actions {
+            assert!(rows.contains(k), "no Settings row for hotkey '{k}'");
+        }
+    }
+
+    #[test]
+    fn default_accelerators_do_not_collide() {
+        let hk = hashterm_core::config::Hotkeys::default();
+        let mut seen = std::collections::HashSet::new();
+        for d in ACTIONS.iter().filter(|d| d.in_app) {
+            let a = hashterm_core::config::normalize_accel((d.accel)(&hk));
+            assert!(!a.is_empty(), "{}: empty default", d.name);
+            assert!(
+                seen.insert(a.clone()),
+                "{}: duplicate default '{a}'",
+                d.name
+            );
+        }
     }
 }

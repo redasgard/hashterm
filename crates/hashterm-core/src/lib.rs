@@ -2,6 +2,8 @@
 
 pub mod config;
 pub mod ipc;
+pub mod logfile;
+pub mod scheme;
 pub mod settings;
 pub mod state;
 
@@ -34,14 +36,7 @@ pub fn app_id() -> String {
     APP_ID.into()
 }
 
-/// Initialize tracing to stderr, honoring `HASHTERM_LOG` (fallback: `RUST_LOG`, then "info").
+/// Initialize tracing (stderr and the state-dir log file) and the panic hook.
 pub fn init_logging() {
-    use tracing_subscriber::EnvFilter;
-    let filter = std::env::var("HASHTERM_LOG")
-        .or_else(|_| std::env::var("RUST_LOG"))
-        .unwrap_or_else(|_| "info".into());
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .with_writer(std::io::stderr)
-        .init();
+    logfile::init();
 }

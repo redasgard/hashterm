@@ -1,0 +1,11 @@
+# One Half Dark — palette from mbadolato/iTerm2-Color-Schemes (MIT); see README.md in this directory.
+name = "One Half Dark"
+dark = true
+foreground = "#dcdfe4"
+background = "#282c34"
+cursor = "#a3b3cc"
+selection = "#474e5d"
+palette = [
+  "#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4",
+  "#5d677a", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4",
+]

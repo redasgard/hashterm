@@ -37,7 +37,10 @@ fn parse(args: &[String]) -> Option<TmuxEvent> {
     // only ever be a hostile name planted on the shared server.
     let session = || {
         let s = args.get(2).cloned().unwrap_or_default();
-        if s.is_empty() || s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        if s.is_empty()
+            || s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
             s
         } else {
             String::new()

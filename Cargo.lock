@@ -931,6 +931,7 @@ version = "0.2.2"
 dependencies = [
  "clap",
  "hashterm-core",
+ "hashterm-platform",
  "hashterm-session",
  "hashterm-tmux",
  "hashterm-ui",

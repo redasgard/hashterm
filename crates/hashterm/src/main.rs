@@ -1,3 +1,5 @@
+mod doctor;
+
 use clap::{Parser, Subcommand};
 use hashterm_core::config::Config;
 use hashterm_core::socket_name;
@@ -21,6 +23,14 @@ struct Cli {
     /// re-adopted; nothing is lost.
     #[arg(long)]
     restart: bool,
+
+    /// Check the environment (tmux, portal, config, log) and exit.
+    #[arg(long)]
+    doctor: bool,
+
+    /// With --doctor: also print the last log lines.
+    #[arg(long, requires = "doctor")]
+    log: bool,
 
     /// Open a new tab in the running instance.
     #[arg(long)]
@@ -133,6 +143,10 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
+    if cli.doctor {
+        return doctor::run(cli.config.as_deref(), cli.log);
+    }
+
     // Restart is handled before any GTK/GApplication setup: terminate the
     // running instance and re-launch a detached fresh one.
     if cli.restart {
@@ -160,6 +174,8 @@ fn main() -> std::process::ExitCode {
             Config::default()
         }
     };
+
+    hashterm_core::logfile::set_file_enabled(config.general.log_to_file);
 
     match cli.cmd {
         Some(Cmd::Dump { name, auto, quiet }) => run_dump(&config, name, auto, quiet),

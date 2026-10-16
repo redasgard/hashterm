@@ -8,12 +8,17 @@ use vte4::prelude::*;
 
 type TitleCallback = Box<dyn Fn(String)>;
 type ExitCallback = Box<dyn Fn()>;
+/// Called with a cleaned link target after a Ctrl+click.
+type LinkCallback = Box<dyn Fn(String)>;
 
 pub struct TerminalPage {
     root: gtk4::Box,
     term: vte4::Terminal,
     on_title: std::rc::Rc<std::cell::RefCell<Option<TitleCallback>>>,
     on_exit: std::rc::Rc<std::cell::RefCell<Option<ExitCallback>>>,
+    on_link: std::rc::Rc<std::cell::RefCell<Option<LinkCallback>>>,
+    created: std::time::Instant,
+    links_enabled: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl TerminalPage {
@@ -25,10 +30,16 @@ impl TerminalPage {
             .scrollback_lines(0)
             .build();
         apply_colors(&term, appearance);
+        apply_cursor(&term, appearance);
         term.set_bold_is_bright(appearance.bold_is_bright);
         term.set_font_desc(Some(&gtk4::pango::FontDescription::from_string(
             &appearance.font,
         )));
+
+        let on_link: std::rc::Rc<std::cell::RefCell<Option<LinkCallback>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let links_enabled = std::rc::Rc::new(std::cell::Cell::new(true));
+        install_links(&term, on_link.clone(), links_enabled.clone());
 
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         root.add_css_class("terminal-page");
@@ -100,7 +111,29 @@ impl TerminalPage {
             term,
             on_title,
             on_exit,
+            on_link,
+            created: std::time::Instant::now(),
+            links_enabled,
         }
+    }
+
+    pub fn set_on_link(&self, cb: LinkCallback) {
+        *self.on_link.borrow_mut() = Some(cb);
+    }
+
+    /// The screen content changed (VTE coalesces; this is cheap). Fires for
+    /// tabs hidden in the stack too.
+    pub fn connect_contents_changed(&self, cb: impl Fn() + 'static) {
+        self.term.connect_contents_changed(move |_| cb());
+    }
+
+    /// How long ago this page was created (startup redraws are not activity).
+    pub fn age(&self) -> std::time::Duration {
+        self.created.elapsed()
+    }
+
+    pub fn set_links_enabled(&self, on: bool) {
+        self.links_enabled.set(on);
     }
 
     pub fn widget(&self) -> &gtk4::Box {
@@ -119,11 +152,17 @@ impl TerminalPage {
 
     pub fn apply_appearance(&self, appearance: &Appearance) {
         apply_colors(&self.term, appearance);
+        apply_cursor(&self.term, appearance);
         self.term.set_bold_is_bright(appearance.bold_is_bright);
         self.term
             .set_font_desc(Some(&gtk4::pango::FontDescription::from_string(
                 &appearance.font,
             )));
+    }
+
+    /// Window-local text zoom (1.0 = the configured font size).
+    pub fn set_font_scale(&self, scale: f64) {
+        self.term.set_font_scale(scale);
     }
 
     /// Force a repaint of the terminal widget (used after a window resize).
@@ -244,10 +283,112 @@ fn confirm_multiline_paste(term: &vte4::Terminal, lines: usize) {
 /// Foreground opaque; background carries the configured opacity so text stays
 /// crisp while the terminal shows through (the window CSS matches this alpha).
 fn apply_colors(term: &vte4::Terminal, appearance: &Appearance) {
-    let fg = gtk4::gdk::RGBA::parse(&appearance.foreground)
-        .unwrap_or_else(|_| gtk4::gdk::RGBA::parse("#c5c8c6").unwrap());
-    let mut bg = gtk4::gdk::RGBA::parse(&appearance.background)
-        .unwrap_or_else(|_| gtk4::gdk::RGBA::parse("#1d1f21").unwrap());
+    let r = appearance.resolved();
+    let parse = |s: &str, fallback: &str| {
+        gtk4::gdk::RGBA::parse(s).unwrap_or_else(|_| gtk4::gdk::RGBA::parse(fallback).unwrap())
+    };
+    let fg = parse(&r.foreground, hashterm_core::scheme::DEFAULT_FG);
+    let mut bg = parse(&r.background, hashterm_core::scheme::DEFAULT_BG);
     bg.set_alpha(appearance.opacity.clamp(0.05, 1.0) as f32);
-    term.set_colors(Some(&fg), Some(&bg), &[]);
+    let palette: Vec<gtk4::gdk::RGBA> = r.palette.iter().map(|c| parse(c, "#808080")).collect();
+    let refs: Vec<&gtk4::gdk::RGBA> = palette.iter().collect();
+    term.set_colors(Some(&fg), Some(&bg), &refs);
+    // Cursor and selection: the scheme's, or VTE's reverse-video when absent.
+    let cursor = r.cursor.as_deref().map(|c| parse(c, &r.foreground));
+    term.set_color_cursor(cursor.as_ref());
+    term.set_color_cursor_foreground(cursor.as_ref().map(|_| &bg));
+    let sel = r.selection.as_deref().map(|c| parse(c, &r.foreground));
+    term.set_color_highlight(sel.as_ref());
+    term.set_color_highlight_foreground(sel.as_ref().map(|_| &fg));
+}
+
+fn apply_cursor(term: &vte4::Terminal, appearance: &Appearance) {
+    term.set_cursor_shape(match appearance.cursor_shape.as_str() {
+        "ibeam" => vte4::CursorShape::Ibeam,
+        "underline" => vte4::CursorShape::Underline,
+        _ => vte4::CursorShape::Block,
+    });
+    term.set_cursor_blink_mode(if appearance.cursor_blink {
+        vte4::CursorBlinkMode::On
+    } else {
+        vte4::CursorBlinkMode::Off
+    });
+}
+
+/// PCRE2_MULTILINE: VTE requires it on match regexes.
+const PCRE2_MULTILINE: u32 = 0x0000_0400;
+
+/// The link under a widget-space point: an OSC 8 hyperlink first, else a
+/// regex match, cleaned of trailing punctuation and checked for sanity.
+fn link_at(term: &vte4::Terminal, x: f64, y: f64) -> Option<String> {
+    let raw = term
+        .check_hyperlink_at(x, y)
+        .map(|g| g.to_string())
+        .or_else(|| {
+            term.check_match_at(x, y)
+                .0
+                .map(|g| crate::links::clean_url(&g))
+        })?;
+    crate::links::is_sane(&raw).then_some(raw)
+}
+
+fn ctrl_held(state: gtk4::gdk::ModifierType) -> bool {
+    state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+}
+
+/// Ctrl+click opens the link under the pointer. The gesture runs in the
+/// capture phase and claims the click ONLY when a link is there, so every
+/// other click (and tmux mouse mode) behaves exactly as before.
+fn install_links(
+    term: &vte4::Terminal,
+    on_link: std::rc::Rc<std::cell::RefCell<Option<LinkCallback>>>,
+    enabled: std::rc::Rc<std::cell::Cell<bool>>,
+) {
+    term.set_allow_hyperlink(true);
+    match vte4::Regex::for_match(crate::links::URL_PATTERN, PCRE2_MULTILINE) {
+        Ok(re) => {
+            let tag = term.match_add_regex(&re, 0);
+            term.match_set_cursor_name(tag, "pointer");
+        }
+        Err(e) => tracing::warn!("link pattern rejected by VTE: {e}"),
+    }
+    let click = gtk4::GestureClick::new();
+    click.set_button(1);
+    click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    {
+        // Weak: a controller that owns its own widget would keep every closed
+        // tab's terminal alive.
+        let term = term.downgrade();
+        let enabled = enabled.clone();
+        click.connect_pressed(move |g, _, x, y| {
+            let Some(term) = term.upgrade() else { return };
+            if !enabled.get() || !ctrl_held(g.current_event_state()) {
+                return;
+            }
+            if let Some(uri) = link_at(&term, x, y) {
+                g.set_state(gtk4::EventSequenceState::Claimed);
+                if let Some(cb) = on_link.borrow().as_ref() {
+                    cb(uri);
+                }
+            }
+        });
+    }
+    term.add_controller(click);
+
+    // With Ctrl held, show where the link really goes.
+    let motion = gtk4::EventControllerMotion::new();
+    motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    {
+        let term = term.downgrade();
+        motion.connect_motion(move |c, x, y| {
+            let Some(term) = term.upgrade() else { return };
+            let tip = if enabled.get() && ctrl_held(c.current_event_state()) {
+                link_at(&term, x, y)
+            } else {
+                None
+            };
+            term.set_tooltip_text(tip.as_deref());
+        });
+    }
+    term.add_controller(motion);
 }

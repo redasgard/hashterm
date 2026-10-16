@@ -6,7 +6,10 @@ pub mod layershell;
 pub mod overlay;
 pub mod x11;
 
-pub use hotkey::{HotkeySourceKind, register_toggle_hotkey};
+pub use hotkey::{
+    HotkeySourceKind, HotkeyStatus, external_toggle_binding, is_toggle_command,
+    probe_global_shortcuts_portal, register_toggle_hotkey, x11_grab_status,
+};
 pub use overlay::{Capabilities, OverlayBackend, OverlayError, PlainWindowOverlay};
 
 /// Pick the overlay backend for the current display server. Called before the

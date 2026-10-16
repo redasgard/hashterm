@@ -89,6 +89,11 @@ struct TabEntry {
     /// Group color "#rrggbb" (outer terminal ring, group-bar dot).
     group_color: Option<String>,
     badge: Option<Badge>,
+    /// Last title the terminal reported (OSC 2 or tmux's default pane title).
+    vte_title: String,
+    /// Foreground program and folder of the active pane (polled from tmux).
+    fact_cmd: String,
+    fact_path: String,
     page: TerminalPage,
 }
 
@@ -165,6 +170,24 @@ pub struct MainWindow {
     opacity_save_timer: std::cell::Cell<Option<gtk4::glib::SourceId>>,
     /// Centered fade-out toast shown after tab switches.
     osd_revealer: gtk4::Revealer,
+    /// One-time guidance strip (first-run hint, hotkey problems).
+    notice: Rc<crate::notice::Notice>,
+    title_poll_busy: std::cell::Cell<bool>,
+    /// Scrollback find bar (built once the window Rc exists).
+    search: RefCell<Option<Rc<crate::search::SearchBar>>>,
+    search_gen: hashterm_tmux::search::Generation,
+    /// The tab the open find bar last searched (the visible tab may differ by
+    /// the time the bar is closed after a tab switch).
+    search_target: RefCell<Option<String>>,
+    /// Window-local text zoom; 1.0 is the configured size.
+    font_scale: std::cell::Cell<f64>,
+    last_layout_change: std::cell::Cell<std::time::Instant>,
+    activity_gates: RefCell<std::collections::HashMap<String, crate::attention::ActivityGate>>,
+    notify_limiter: RefCell<crate::attention::RateLimiter>,
+    /// Regenerates the config-derived CSS (set by the app, which owns the provider).
+    restyle: RefCell<Option<Rc<dyn Fn()>>>,
+    /// What the global hotkey is really doing (portal answers asynchronously).
+    hotkey_status: RefCell<hashterm_platform::HotkeyStatus>,
     /// The toast body: rebuilt per show — one line for a message, or a
     /// prev/current/next wheel for a tab switch.
     osd_content: gtk4::Box,
@@ -263,6 +286,8 @@ impl MainWindow {
             .can_target(false)
             .build();
         overlay.add_overlay(&osd_revealer);
+        let notice = crate::notice::Notice::new();
+        overlay.add_overlay(notice.widget());
 
         // The whole content sits in a SlidePanel; in normal-window mode the
         // offset simply stays 0 and it is a transparent pass-through.
@@ -308,6 +333,17 @@ impl MainWindow {
             opacity_override: std::cell::Cell::new(ui_state.window_opacity),
             opacity_save_timer: std::cell::Cell::new(None),
             osd_revealer,
+            notice,
+            title_poll_busy: std::cell::Cell::new(false),
+            search: RefCell::new(None),
+            search_gen: Default::default(),
+            search_target: RefCell::new(None),
+            font_scale: std::cell::Cell::new(1.0),
+            last_layout_change: std::cell::Cell::new(std::time::Instant::now()),
+            activity_gates: RefCell::new(Default::default()),
+            notify_limiter: RefCell::new(Default::default()),
+            restyle: RefCell::new(None),
+            hotkey_status: RefCell::new(hashterm_platform::HotkeyStatus::Pending),
             osd_content,
             osd_timeout: std::cell::Cell::new(None),
             accent_css: {
@@ -403,6 +439,44 @@ impl MainWindow {
         this.wire_quit_autosave();
         this.wire_signal_snapshot();
         this.wire_geometry_memory();
+        this.wire_title_poll();
+        this.wire_system_scheme();
+        this.wire_search();
+        {
+            // Layout changes make tmux repaint; seen-ness changes clear badges.
+            let weak = Rc::downgrade(&this);
+            this.window.connect_default_width_notify({
+                let weak = weak.clone();
+                move |_| {
+                    if let Some(w) = weak.upgrade() {
+                        w.last_layout_change.set(std::time::Instant::now());
+                    }
+                }
+            });
+            this.window.connect_default_height_notify({
+                let weak = weak.clone();
+                move |_| {
+                    if let Some(w) = weak.upgrade() {
+                        w.last_layout_change.set(std::time::Instant::now());
+                    }
+                }
+            });
+            this.window.connect_map({
+                let weak = weak.clone();
+                move |_| {
+                    if let Some(w) = weak.upgrade() {
+                        w.last_layout_change.set(std::time::Instant::now());
+                        w.mark_active_seen();
+                    }
+                }
+            });
+            this.window.connect_is_active_notify(move |_| {
+                if let Some(w) = weak.upgrade() {
+                    w.mark_active_seen();
+                }
+            });
+        }
+        this.schedule_first_run_hint();
         this.wire_redraw_on_resize();
         this.refresh_toggle_shortcut();
         this.adopt_or_create();
@@ -857,11 +931,12 @@ impl MainWindow {
     /// Hand the remembered geometry to the overlay backend ahead of a
     /// `place_and_show`.
     fn sync_saved_geometry(&self) {
-        self.backend.set_saved_geometry(if self.config.borrow().dropdown.enabled {
-            self.saved_geometry()
-        } else {
-            None
-        });
+        self.backend
+            .set_saved_geometry(if self.config.borrow().dropdown.enabled {
+                self.saved_geometry()
+            } else {
+                None
+            });
     }
 
     fn store_geometry(&self, g: WindowGeometry) {
@@ -1106,6 +1181,8 @@ impl MainWindow {
     }
 
     pub fn close_tab(self: &Rc<Self>, session: &str) {
+        self.notify_limiter.borrow_mut().forget(session);
+        self.activity_gates.borrow_mut().remove(session);
         let kill = self.config.borrow().general.close_kills_session;
         if kill && let Err(e) = self.ctl.run(&["kill-session", "-t", session]) {
             tracing::error!("kill-session {session}: {e}");
@@ -1131,8 +1208,7 @@ impl MainWindow {
             let tabs = self.tabs.borrow();
             let t = tabs.iter().find(|t| t.session == session)?;
             let group = t.group_name().to_owned();
-            let members: Vec<&TabEntry> =
-                tabs.iter().filter(|x| x.group_name() == group).collect();
+            let members: Vec<&TabEntry> = tabs.iter().filter(|x| x.group_name() == group).collect();
             let index = members.iter().position(|x| x.session == session)?;
             let color = members.iter().find_map(|x| x.group_color.clone());
             (group, index, color)
@@ -1356,9 +1432,112 @@ impl MainWindow {
         self.refresh_tabbar();
     }
 
+    /// Ctrl+Shift+W: closes the active PANE while the tab has several, then
+    /// the tab itself exactly as before.
     pub fn close_active_tab(self: &Rc<Self>) {
-        if let Some(name) = self.stack.visible_child_name() {
-            self.close_tab(name.as_str());
+        let Some(name) = self.stack.visible_child_name() else {
+            return;
+        };
+        let id = hashterm_tmux::TmuxSessionId(name.to_string());
+        match self.ctl.pane_count(&id) {
+            Ok(n) if n > 1 => self.pane_op(move |ctl| ctl.kill_active_pane(&id).map(|_| None)),
+            Ok(_) => self.close_tab(name.as_str()),
+            // Never guess "one pane" and close a tab that may hold several.
+            Err(e) => {
+                tracing::warn!("pane count failed: {e}");
+                self.show_osd_message("Couldn't read the pane count; nothing closed", 2500);
+            }
+        }
+    }
+
+    /// The tab's "x": always the whole tab, but asks first when it holds
+    /// several panes (closing it would end all of them).
+    pub fn request_close_tab(self: &Rc<Self>, session: &str) {
+        let id = hashterm_tmux::TmuxSessionId(session.to_string());
+        let panes = match self.ctl.pane_count(&id) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("pane count failed: {e}");
+                self.show_osd_message("Couldn't read the pane count; nothing closed", 2500);
+                return;
+            }
+        };
+        if panes <= 1 {
+            self.close_tab(session);
+            return;
+        }
+        let session = session.to_string();
+        self.confirm(
+            &format!("Close this tab and its {panes} panes?"),
+            "Everything running in them will end.",
+            "Close tab",
+            "Cancel",
+            false,
+            {
+                let this = Rc::downgrade(self);
+                move |yes| {
+                    if let (true, Some(win)) = (yes, this.upgrade()) {
+                        win.close_tab(&session);
+                    }
+                }
+            },
+        );
+    }
+
+    // ---- panes (tmux draws them) -------------------------------------------
+
+    /// Run a pane operation off the UI thread. `Ok(Some(msg))` is shown as an
+    /// OSD (e.g. zoom state); an error shows tmux's own message.
+    fn pane_op(
+        self: &Rc<Self>,
+        op: impl FnOnce(
+            &hashterm_tmux::TmuxController,
+        ) -> Result<Option<String>, hashterm_tmux::TmuxError>
+        + Send
+        + 'static,
+    ) {
+        let ctl: hashterm_tmux::TmuxController = (*self.ctl).clone();
+        let weak = Rc::downgrade(self);
+        gtk4::glib::spawn_future_local(async move {
+            let res = gtk4::gio::spawn_blocking(move || op(&ctl)).await;
+            let Some(win) = weak.upgrade() else { return };
+            match res {
+                Ok(Ok(Some(msg))) => win.show_osd_message(&msg, 1200),
+                Ok(Ok(None)) => {}
+                Ok(Err(hashterm_tmux::TmuxError::Command { stderr, .. })) => {
+                    win.show_osd_message(&stderr, 2500)
+                }
+                Ok(Err(e)) => win.show_osd_message(&e.to_string(), 2500),
+                Err(_) => {}
+            }
+            win.with_active_page(|p| p.queue_redraw());
+        });
+    }
+
+    fn active_id(&self) -> Option<hashterm_tmux::TmuxSessionId> {
+        self.stack
+            .visible_child_name()
+            .map(|n| hashterm_tmux::TmuxSessionId(n.to_string()))
+    }
+
+    pub fn pane_split(self: &Rc<Self>, horizontal: bool) {
+        if let Some(id) = self.active_id() {
+            self.pane_op(move |ctl| ctl.split(&id, horizontal).map(|_| None));
+        }
+    }
+
+    pub fn pane_focus(self: &Rc<Self>, dir: hashterm_tmux::panes::Dir) {
+        if let Some(id) = self.active_id() {
+            self.pane_op(move |ctl| ctl.select_pane(&id, dir).map(|_| None));
+        }
+    }
+
+    pub fn pane_zoom(self: &Rc<Self>) {
+        if let Some(id) = self.active_id() {
+            self.pane_op(move |ctl| {
+                ctl.zoom_pane(&id)
+                    .map(|z| Some(if z { "Pane zoomed" } else { "Pane restored" }.to_string()))
+            });
         }
     }
 
@@ -1382,12 +1561,14 @@ impl MainWindow {
 
     pub fn select_tab(self: &Rc<Self>, session: &str) {
         self.stack.set_visible_child_name(session);
+        self.withdraw_notification(session);
         let group = {
             let mut tabs = self.tabs.borrow_mut();
             let entry = tabs.iter_mut().find(|t| t.session == session);
             if let Some(entry) = entry {
                 entry.badge = None;
                 entry.page.grab_focus();
+                self.activity_gates.borrow_mut().remove(session);
                 Some(entry.group_name().to_owned())
             } else {
                 None
@@ -1887,7 +2068,18 @@ impl MainWindow {
                     .filter(|t| t.group_name() == name)
                     .find_map(|t| t.group_color.clone());
                 let count = tabs.iter().filter(|t| t.group_name() == name).count();
-                crate::tabbar::GroupInfo { name, color, count }
+                let (attention, attention_count) = crate::attention::summarize(
+                    tabs.iter()
+                        .filter(|t| t.group_name() == name)
+                        .map(|t| t.badge),
+                );
+                crate::tabbar::GroupInfo {
+                    name,
+                    color,
+                    count,
+                    attention,
+                    attention_count,
+                }
             })
             .collect()
     }
@@ -2252,6 +2444,7 @@ impl MainWindow {
         }
 
         let mut tabs = self.tabs.borrow_mut();
+        let tabs_before = tabs.len();
 
         // Add tabs for sessions we don't show yet (created externally or adopted).
         for info in &live {
@@ -2272,6 +2465,24 @@ impl MainWindow {
             }
             let argv = self.ctl.attach_argv(&info.id);
             let page = TerminalPage::new(&argv, &self.config.borrow().appearance);
+            page.set_links_enabled(self.config.borrow().links.enabled);
+            {
+                let this = Rc::downgrade(self);
+                let session = info.name.clone();
+                page.connect_contents_changed(move || {
+                    if let Some(win) = this.upgrade() {
+                        win.on_tab_contents(&session);
+                    }
+                });
+            }
+            {
+                let this = Rc::downgrade(self);
+                page.set_on_link(Box::new(move |uri| {
+                    if let Some(win) = this.upgrade() {
+                        win.open_link(&uri);
+                    }
+                }));
+            }
             self.stack
                 .add_named(page.widget(), Some(info.name.as_str()));
             let title = if info.title.is_empty() {
@@ -2305,10 +2516,25 @@ impl MainWindow {
                 group: info.group.clone(),
                 group_color: info.group_color.clone(),
                 badge: None,
+                vte_title: String::new(),
+                fact_cmd: String::new(),
+                fact_path: String::new(),
                 page,
             });
         }
+        let added = tabs.len() > tabs_before;
         drop(tabs);
+        if added {
+            // The tmux server exists now (it may be newly started): colour its UI.
+            self.apply_tmux_styles();
+            // Give a fresh tab its folder name now instead of at the next tick.
+            let weak = Rc::downgrade(self);
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+                if let Some(win) = weak.upgrade() {
+                    win.poll_titles();
+                }
+            });
+        }
 
         // Self-heal group colors: every member carries the group's derived
         // color (first member with one set). Write only on divergence.
@@ -2385,6 +2611,7 @@ impl MainWindow {
         }
     }
 
+    /// The terminal reported a title (OSC 2, or tmux's default: the host name).
     pub fn set_tab_title(self: &Rc<Self>, session: &str, title: String) {
         if let Some(t) = self
             .tabs
@@ -2392,34 +2619,230 @@ impl MainWindow {
             .iter_mut()
             .find(|t| t.session == session)
         {
+            t.vte_title = title;
+        }
+        self.retitle(session);
+    }
+
+    /// Recompute a tab's label from what the terminal said and what tmux
+    /// knows about the pane (folder, foreground program).
+    fn retitle(self: &Rc<Self>, session: &str) {
+        let auto = self.config.borrow().tabbar.auto_titles;
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            let Some(t) = tabs.iter_mut().find(|t| t.session == session) else {
+                return;
+            };
             if t.title_custom {
                 return; // user-pinned name: automatic titles don't apply
             }
-            if t.title == title {
-                return; // no change: skip the widget rebuild
+            let title = if auto {
+                crate::title::auto_title(
+                    &t.vte_title,
+                    &t.fact_cmd,
+                    &t.fact_path,
+                    crate::title::Env::current(),
+                )
+            } else {
+                t.vte_title.clone()
+            };
+            if title.is_empty() || t.title == title {
+                return; // nothing to show, or no change: skip the widget rebuild
             }
+            tracing::debug!("tab {session} title -> {title:?}");
             t.title = title;
         }
         self.refresh_tabbar();
     }
 
-    pub fn set_badge(self: &Rc<Self>, session: &str, badge: Badge) {
-        let active = self.stack.visible_child_name().map(|s| s.to_string());
-        if active.as_deref() == Some(session) {
-            return; // no badges on the tab the user is looking at
-        }
-        if let Some(t) = self
-            .tabs
-            .borrow_mut()
-            .iter_mut()
-            .find(|t| t.session == session)
-        {
-            if t.badge == Some(badge) {
-                return; // no change: skip the widget rebuild
+    /// Poll tmux for each tab's folder and foreground program while the
+    /// window is on screen (one `list-panes -a` call off the GTK thread,
+    /// about 5 ms). tmux only pushes the FIRST folder change as a title, so
+    /// this is what keeps labels following `cd`.
+    fn wire_title_poll(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+            let Some(win) = this.upgrade() else {
+                return gtk4::glib::ControlFlow::Break;
+            };
+            if win.window.is_visible() {
+                win.poll_titles();
             }
-            t.badge = Some(badge);
+            gtk4::glib::ControlFlow::Continue
+        });
+    }
+
+    /// One off-thread `list-panes -a` round trip; a no-op while one is in
+    /// flight or when automatic titles are off.
+    fn poll_titles(self: &Rc<Self>) {
+        if self.title_poll_busy.get() || !self.config.borrow().tabbar.auto_titles {
+            return;
         }
-        self.refresh_tabbar();
+        self.title_poll_busy.set(true);
+        let ctl: hashterm_tmux::TmuxController = (*self.ctl).clone();
+        let weak = Rc::downgrade(self);
+        gtk4::glib::spawn_future_local(async move {
+            let facts = gtk4::gio::spawn_blocking(move || ctl.pane_facts()).await;
+            let Some(win) = weak.upgrade() else { return };
+            win.title_poll_busy.set(false);
+            if let Ok(Ok(facts)) = facts {
+                win.apply_pane_facts(facts);
+            }
+        });
+    }
+
+    fn apply_pane_facts(self: &Rc<Self>, facts: Vec<hashterm_tmux::controller::PaneFact>) {
+        let mut changed = Vec::new();
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            for f in facts {
+                if let Some(t) = tabs.iter_mut().find(|t| t.session == f.session)
+                    && (t.fact_cmd != f.command || t.fact_path != f.path)
+                {
+                    t.fact_cmd = f.command;
+                    t.fact_path = f.path;
+                    changed.push(t.session.clone());
+                }
+            }
+        }
+        for session in changed {
+            self.retitle(&session);
+        }
+    }
+
+    /// Seen = this tab is showing, the window is on screen, and it has focus.
+    fn is_seen(&self, session: &str) -> bool {
+        self.stack.visible_child_name().as_deref() == Some(session)
+            && self.window.is_visible()
+            && self.window.is_active()
+    }
+
+    /// The window just became visible or focused: whatever tab is showing has
+    /// been seen, so its badge (set while we were away) goes.
+    pub fn mark_active_seen(self: &Rc<Self>) {
+        let Some(name) = self.stack.visible_child_name() else {
+            return;
+        };
+        if !self.is_seen(name.as_str()) {
+            return;
+        }
+        let cleared = {
+            let mut tabs = self.tabs.borrow_mut();
+            tabs.iter_mut()
+                .find(|t| t.session == name.as_str())
+                .is_some_and(|t| t.badge.take().is_some())
+        };
+        if cleared {
+            self.withdraw_notification(name.as_str());
+            self.refresh_tabbar();
+        }
+    }
+
+    pub fn set_badge(self: &Rc<Self>, session: &str, badge: Badge) {
+        let seen = self.is_seen(session);
+        tracing::debug!("badge {session} {badge:?} seen={seen}");
+        let notif = self.config.borrow().notifications.clone();
+        if !seen {
+            let mut tabs = self.tabs.borrow_mut();
+            let Some(t) = tabs.iter_mut().find(|t| t.session == session) else {
+                return;
+            };
+            // A stronger badge replaces a weaker one, never the reverse.
+            let (best, _) = crate::attention::summarize([t.badge, Some(badge)]);
+            if t.badge != best {
+                t.badge = best;
+                drop(tabs);
+                self.refresh_tabbar();
+            }
+        }
+        let wanted = notif.enabled
+            && crate::attention::notify_wanted(badge, notif.on_bell, notif.on_activity)
+            && (!seen || !notif.only_when_unseen);
+        if wanted {
+            self.notify_tab(session, badge, notif.min_interval_secs);
+        }
+    }
+
+    /// A background tab's screen changed: after 5 s of silence that is
+    /// "activity". Redraws right after a tab is created or shown are not.
+    fn on_tab_contents(self: &Rc<Self>, session: &str) {
+        if self.is_seen(session) {
+            return;
+        }
+        let young = self
+            .tabs
+            .borrow()
+            .iter()
+            .find(|t| t.session == session)
+            .is_none_or(|t| t.page.age() < std::time::Duration::from_secs(4));
+        if young || !self.window_settled() {
+            return;
+        }
+        let fire = self
+            .activity_gates
+            .borrow_mut()
+            .entry(session.to_string())
+            .or_default()
+            .on_change(std::time::Instant::now(), std::time::Duration::from_secs(5));
+        if fire {
+            self.set_badge(session, Badge::Activity);
+        }
+    }
+
+    /// True unless the window was shown/resized a moment ago (tmux repaints
+    /// every pane on a resize, which is not something to be told about).
+    fn window_settled(&self) -> bool {
+        self.last_layout_change.get().elapsed() > std::time::Duration::from_millis(1500)
+    }
+
+    fn notify_tab(self: &Rc<Self>, session: &str, badge: Badge, min_interval_secs: u32) {
+        let allowed = self.notify_limiter.borrow_mut().allow(
+            session,
+            std::time::Instant::now(),
+            std::time::Duration::from_secs(min_interval_secs as u64),
+        );
+        if !allowed {
+            return;
+        }
+        let Some(app) = self.window.application() else {
+            return;
+        };
+        let (title, group) = {
+            let tabs = self.tabs.borrow();
+            match tabs.iter().find(|t| t.session == session) {
+                Some(t) => (t.title.clone(), t.group_name().to_string()),
+                None => return,
+            }
+        };
+        let what = match badge {
+            Badge::Bell => "bell",
+            _ => "new output",
+        };
+        let n = gtk4::gio::Notification::new("hashterm");
+        let place = if group == hashterm_tmux::controller::DEFAULT_GROUP {
+            title
+        } else {
+            format!("{group} \u{203A} {title}")
+        };
+        // Titles come from program output: keep them plain, short and inert.
+        n.set_body(Some(&format!(
+            "{}: {what}",
+            crate::links::plain_text(&place, 80)
+        )));
+        n.set_default_action_and_target_value("app.show-tab", Some(&session.to_variant()));
+        app.send_notification(Some(&format!("tab-{session}")), &n);
+    }
+
+    fn withdraw_notification(&self, session: &str) {
+        if let Some(app) = self.window.application() {
+            app.withdraw_notification(&format!("tab-{session}"));
+        }
+    }
+
+    /// Notification click: show the console on that tab.
+    pub fn show_tab(self: &Rc<Self>, session: &str) {
+        self.present();
+        self.select_tab(session);
     }
 
     // ---- config-driven layout ------------------------------------------
@@ -2427,6 +2850,12 @@ impl MainWindow {
     pub fn apply_config(self: &Rc<Self>) {
         let cfg = self.config.borrow().tabbar.clone();
         self.tabbar.apply_config(&cfg);
+        {
+            let hk = self.config.borrow().hotkeys.clone();
+            let label = |accel: &str| self.accel_label(accel);
+            self.tabbar
+                .set_shortcut_tips(&label(&hk.new_tab), &label(&hk.close_tab));
+        }
         self.place_tabbar();
         self.place_groupbar();
         self.apply_window_classes();
@@ -2434,10 +2863,15 @@ impl MainWindow {
         self.tabbar.set_revealed(!cfg.auto_hide);
         self.hover_strip.set_visible(cfg.auto_hide);
         let appearance = self.config.borrow().appearance.clone();
+        hashterm_core::logfile::set_file_enabled(self.config.borrow().general.log_to_file);
         self.window.set_opacity(self.effective_opacity());
         for tab in self.tabs.borrow().iter() {
             tab.page.apply_appearance(&appearance);
+            tab.page.set_font_scale(self.font_scale.get());
+            tab.page
+                .set_links_enabled(self.config.borrow().links.enabled);
         }
+        self.apply_tmux_styles();
         self.refresh_toggle_shortcut();
         self.refresh_tabbar();
     }
@@ -2540,8 +2974,9 @@ impl MainWindow {
                     win.select_tab(&id);
                     win.show_tab_osd();
                 }
-                TabBarEvent::Close(id) => win.close_tab(&id),
+                TabBarEvent::Close(id) => win.request_close_tab(&id),
                 TabBarEvent::NewTab => win.new_tab(),
+                TabBarEvent::NewGroup => win.new_group_with_tab(),
                 TabBarEvent::Reorder(id, index) => win.reorder_tab(&id, index),
                 TabBarEvent::Properties(id) => win.open_tab_properties(&id),
                 TabBarEvent::Rename(id) => win.rename_tab(&id),
@@ -2825,16 +3260,20 @@ impl MainWindow {
         let gb_cfg = self.config.borrow().groupbar.clone();
         // Reveal, don't set_visible: the Revealer's slide transition should
         // play when the group count crosses the hide_when_single threshold.
-        self.groupbar
-            .widget()
-            .set_reveal_child(!(gb_cfg.hide_when_single && groups.len() < 2));
-        self.groupbar
-            .set_groups(
-                groups.clone(),
-                active_group.clone(),
-                gb_cfg.show_counts,
-                gb_cfg.reorderable,
-            );
+        let group_bar_hidden = gb_cfg.hide_when_single && groups.len() < 2;
+        self.groupbar.widget().set_reveal_child(!group_bar_hidden);
+        // While the matrix' second axis is hidden, offer it where the eye is.
+        {
+            let accel = self.config.borrow().hotkeys.new_group.clone();
+            let label = self.accel_label(&accel);
+            self.tabbar.set_group_chip(group_bar_hidden, &label);
+        }
+        self.groupbar.set_groups(
+            groups.clone(),
+            active_group.clone(),
+            gb_cfg.show_counts,
+            gb_cfg.reorderable,
+        );
         self.tabbar.set_tabs(infos, active, groups, active_group);
         self.apply_accents();
     }
@@ -2989,6 +3428,366 @@ impl MainWindow {
                 pw.is_mapped()
             );
         }
+    }
+
+    // ---- links ------------------------------------------------------------
+
+    /// Open a link the user Ctrl+clicked, if its scheme is on the allowlist.
+    pub fn open_link(self: &Rc<Self>, uri: &str) {
+        if !crate::links::is_sane(uri) {
+            return;
+        }
+        if !crate::links::is_allowed(uri) {
+            let scheme = crate::links::scheme_of(uri)
+                .map(|s| crate::links::plain_text(&s, 16))
+                .unwrap_or_else(|| "unknown".into());
+            self.show_osd_message(&format!("Won't open {scheme}: links"), 2500);
+            return;
+        }
+        // Debug builds only (like HASHTERM_SOCKET): record instead of launching,
+        // so headless tests can assert exactly what a click would open.
+        if cfg!(debug_assertions)
+            && let Some(path) = std::env::var_os("HASHTERM_TEST_OPEN_LOG")
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(f, "{uri}");
+            }
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        gtk4::UriLauncher::new(uri).launch(
+            Some(&self.window),
+            gtk4::gio::Cancellable::NONE,
+            move |result| {
+                if let Err(e) = result {
+                    tracing::warn!("cannot open a link: {e}");
+                    if let Some(win) = weak.upgrade() {
+                        win.show_osd_message("Couldn't open that link", 2500);
+                    }
+                }
+            },
+        );
+    }
+
+    // ---- scrollback search (tmux copy-mode) ----------------------------
+
+    fn wire_search(self: &Rc<Self>) {
+        let (w1, w2, w3) = (
+            Rc::downgrade(self),
+            Rc::downgrade(self),
+            Rc::downgrade(self),
+        );
+        let bar = crate::search::SearchBar::new(
+            Rc::new(move |text| {
+                if let Some(win) = w1.upgrade() {
+                    win.run_search(Some(text));
+                }
+            }),
+            Rc::new(move |reverse| {
+                if let Some(win) = w2.upgrade() {
+                    win.step_search(reverse);
+                }
+            }),
+            Rc::new(move || {
+                if let Some(win) = w3.upgrade() {
+                    win.close_search();
+                }
+            }),
+        );
+        self.overlay.add_overlay(bar.widget());
+        *self.search.borrow_mut() = Some(bar);
+        // Switching tab ends the search on the old one.
+        let weak = Rc::downgrade(self);
+        self.stack.connect_visible_child_name_notify(move |_| {
+            if let Some(win) = weak.upgrade() {
+                win.close_search();
+            }
+        });
+    }
+
+    fn search_bar(&self) -> Option<Rc<crate::search::SearchBar>> {
+        self.search.borrow().clone()
+    }
+
+    pub fn open_search(self: &Rc<Self>) {
+        if let Some(bar) = self.search_bar() {
+            bar.open();
+            // Reopened with text from last time: search it again right away.
+            if !bar.text().is_empty() {
+                self.run_search(Some(bar.text()));
+            }
+        }
+    }
+
+    pub fn close_search(self: &Rc<Self>) {
+        let Some(bar) = self.search_bar() else { return };
+        if !bar.is_open() {
+            return;
+        }
+        bar.close();
+        self.search_gen.bump(); // drop in-flight results
+        let target = self
+            .search_target
+            .borrow_mut()
+            .take()
+            .or_else(|| self.stack.visible_child_name().map(|n| n.to_string()));
+        if let Some(name) = target {
+            let ctl: hashterm_tmux::TmuxController = (*self.ctl).clone();
+            let id = hashterm_tmux::TmuxSessionId(name);
+            std::thread::spawn(move || ctl.search_cancel(&id));
+        }
+        self.with_active_page(|p| p.grab_focus());
+    }
+
+    /// New query (`Some`) or step (`None`) on the visible tab, off the UI
+    /// thread; a result is shown only if no newer query was started meanwhile.
+    fn run_search(self: &Rc<Self>, text: Option<String>) {
+        self.search_job(move |ctl, id| match &text {
+            Some(t) => ctl.search_start(id, t),
+            None => ctl.search_info(id),
+        });
+    }
+
+    fn step_search(self: &Rc<Self>, reverse: bool) {
+        self.search_job(move |ctl, id| ctl.search_step(id, reverse));
+    }
+
+    fn search_job(
+        self: &Rc<Self>,
+        job: impl FnOnce(
+            &hashterm_tmux::TmuxController,
+            &hashterm_tmux::TmuxSessionId,
+        )
+            -> Result<hashterm_tmux::search::SearchResult, hashterm_tmux::TmuxError>
+        + Send
+        + 'static,
+    ) {
+        let (Some(bar), Some(name)) = (self.search_bar(), self.stack.visible_child_name()) else {
+            return;
+        };
+        let ticket = self.search_gen.bump();
+        *self.search_target.borrow_mut() = Some(name.to_string());
+        let gen_handle = self.search_gen.clone();
+        let ctl: hashterm_tmux::TmuxController = (*self.ctl).clone();
+        let id = hashterm_tmux::TmuxSessionId(name.to_string());
+        let weak = Rc::downgrade(self);
+        gtk4::glib::spawn_future_local(async move {
+            // A query superseded while it waited for the tmux lock never runs.
+            let res = gtk4::gio::spawn_blocking(move || {
+                // Superseded while queued: never touch tmux. (The controller
+                // methods serialize themselves; do not lock again here.)
+                gen_handle.is_current(ticket).then(|| job(&ctl, &id))
+            })
+            .await;
+            let Some(win) = weak.upgrade() else { return };
+            if !win.search_gen.is_current(ticket) {
+                return;
+            }
+            match res {
+                Ok(None) => {}
+                Ok(Some(Ok(r))) => bar.show_result(r.present, r.count),
+                Ok(Some(Err(e))) => {
+                    tracing::debug!("search failed: {e}");
+                    bar.show_result(false, Some(0));
+                }
+                Err(_) => {}
+            }
+        });
+    }
+
+    // ---- colour scheme, zoom -------------------------------------------
+
+    /// Text zoom for this window only. `delta` 0 resets; clamped to 0.5x..4x.
+    pub fn zoom(self: &Rc<Self>, delta: f64) {
+        let next = if delta == 0.0 {
+            1.0
+        } else {
+            ((self.font_scale.get() + delta) * 100.0).round() / 100.0
+        }
+        .clamp(0.5, 4.0);
+        self.font_scale.set(next);
+        for tab in self.tabs.borrow().iter() {
+            tab.page.set_font_scale(next);
+        }
+        self.show_osd_message(
+            &format!("Text size {}%", (next * 100.0).round() as i32),
+            900,
+        );
+    }
+
+    pub fn set_restyle(&self, f: Rc<dyn Fn()>) {
+        *self.restyle.borrow_mut() = Some(f);
+    }
+
+    /// The effective colours changed without a config edit (desktop theme flip).
+    fn apply_appearance_only(self: &Rc<Self>) {
+        let f = self.restyle.borrow().clone();
+        if let Some(f) = f {
+            f();
+        }
+        self.apply_config();
+    }
+
+    /// Push the scheme's colours into tmux's own UI (off the UI thread).
+    fn apply_tmux_styles(&self) {
+        let styles =
+            hashterm_core::scheme::tmux_styles(&self.config.borrow().appearance.resolved());
+        let ctl: hashterm_tmux::TmuxController = (*self.ctl).clone();
+        std::thread::spawn(move || {
+            if let Err(e) = ctl.set_window_styles(&styles) {
+                tracing::debug!("tmux styles not applied: {e}");
+            }
+        });
+    }
+
+    /// Follow the desktop's light/dark preference (GNOME `color-scheme`).
+    fn wire_system_scheme(self: &Rc<Self>) {
+        use gtk4::gio::prelude::*;
+        let Some(src) = gtk4::gio::SettingsSchemaSource::default() else {
+            return;
+        };
+        if src.lookup("org.gnome.desktop.interface", true).is_none() {
+            return;
+        }
+        let settings = gtk4::gio::Settings::new("org.gnome.desktop.interface");
+        let read = |s: &gtk4::gio::Settings| {
+            hashterm_core::scheme::set_system_dark(Some(hashterm_core::scheme::dark_from_gnome(
+                s.string("color-scheme").as_str(),
+            )));
+        };
+        read(&settings);
+        let weak = Rc::downgrade(self);
+        settings.connect_changed(Some("color-scheme"), move |s, _| {
+            read(s);
+            if let Some(win) = weak.upgrade()
+                && win.config.borrow().appearance.follow_system
+            {
+                win.apply_appearance_only();
+            }
+        });
+        // Keep the Settings object alive for the process lifetime.
+        std::mem::forget(settings);
+    }
+
+    // ---- guidance notices ------------------------------------------------
+
+    fn accel_label(&self, accel: &str) -> String {
+        gtk4::accelerator_parse(hashterm_core::config::normalize_accel(accel))
+            .map(|(k, m)| gtk4::accelerator_get_label(k, m).to_string())
+            .unwrap_or_default()
+    }
+
+    fn hint_seen(id: &str) -> bool {
+        hashterm_core::state::UiState::load()
+            .hints_seen
+            .iter()
+            .any(|h| h == id)
+    }
+
+    fn mark_hint_seen(id: &str) {
+        let mut st = hashterm_core::state::UiState::load();
+        if !st.hints_seen.iter().any(|h| h == id) {
+            st.hints_seen.push(id.to_string());
+            st.save();
+        }
+    }
+
+    /// Show the welcome strip once, when the console is actually on screen.
+    fn schedule_first_run_hint(self: &Rc<Self>) {
+        if Self::hint_seen("welcome") {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(900), move || {
+            let Some(win) = this.upgrade() else {
+                return gtk4::glib::ControlFlow::Break;
+            };
+            if !win.window.is_visible() || win.tabs.borrow().is_empty() {
+                return gtk4::glib::ControlFlow::Continue; // still hidden or empty
+            }
+            // Seen the moment it is displayed: it never nags on later launches.
+            Self::mark_hint_seen("welcome");
+            let (hk, dropdown) = {
+                let c = win.config.borrow();
+                (c.hotkeys.clone(), c.dropdown.enabled)
+            };
+            let text = crate::notice::welcome_text(
+                dropdown,
+                &win.accel_label(&hk.toggle_dropdown),
+                &win.accel_label(&hk.new_tab),
+                &win.accel_label(&hk.new_group),
+                &win.accel_label(&hk.settings),
+            );
+            win.notice
+                .show(&text, vec![("Got it".into(), Rc::new(|| {}))]);
+            win.notice.hide_after(25);
+            gtk4::glib::ControlFlow::Break
+        });
+    }
+
+    /// The global hotkey reported a state (possibly late, from the portal).
+    pub fn set_hotkey_status(self: &Rc<Self>, status: hashterm_platform::HotkeyStatus) {
+        // A desktop-level shortcut that runs `hashterm --toggle` is a working
+        // setup, not a problem: report it instead of nagging.
+        let status = if status.needs_attention() {
+            match hashterm_platform::external_toggle_binding() {
+                Some(trigger) => hashterm_platform::HotkeyStatus::External { trigger },
+                None => status,
+            }
+        } else {
+            status
+        };
+        tracing::info!("global hotkey: {}", status.describe());
+        *self.hotkey_status.borrow_mut() = status.clone();
+        if status.needs_attention() && !Self::hint_seen("hotkey") {
+            let this = Rc::downgrade(self);
+            let weak_win = Rc::downgrade(self);
+            let copy: crate::notice::Action = Rc::new(move || {
+                if let Some(win) = weak_win.upgrade() {
+                    win.copy_toggle_command();
+                }
+            });
+            let dismiss: crate::notice::Action = Rc::new(|| Self::mark_hint_seen("hotkey"));
+            // Let the first-run strip (if any) finish first: retry while a
+            // notice is up (it hides itself after 25 s).
+            let tries = std::cell::Cell::new(0u32);
+            gtk4::glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
+                let Some(win) = this.upgrade() else {
+                    return gtk4::glib::ControlFlow::Break;
+                };
+                // A drop-down that starts hidden is the normal case: keep
+                // waiting for it to appear (bounded: about two minutes).
+                if tries.get() >= 40 {
+                    return gtk4::glib::ControlFlow::Break;
+                }
+                if !win.window.is_visible() || win.notice.is_shown() {
+                    tries.set(tries.get() + 1);
+                    return gtk4::glib::ControlFlow::Continue;
+                }
+                win.notice.show(
+                    &format!("Global hotkey: {}", status.describe()),
+                    vec![
+                        ("Copy command".into(), copy.clone()),
+                        ("Don't remind me".into(), dismiss.clone()),
+                    ],
+                );
+                gtk4::glib::ControlFlow::Break
+            });
+        }
+    }
+
+    pub fn hotkey_status(&self) -> hashterm_platform::HotkeyStatus {
+        self.hotkey_status.borrow().clone()
+    }
+
+    /// Put `hashterm --toggle` (the always-works fallback) on the clipboard.
+    pub fn copy_toggle_command(&self) {
+        self.window.clipboard().set_text("hashterm --toggle");
     }
 
     /// The live configuration (shared with the config watcher).

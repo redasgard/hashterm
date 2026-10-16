@@ -198,7 +198,10 @@ edge = \"top\"
             )],
         )
         .unwrap();
-        assert!(out.contains("font = \"Fira Code 10\"  # keep this"), "{out}");
+        assert!(
+            out.contains("font = \"Fira Code 10\"  # keep this"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -269,7 +272,11 @@ edge = \"top\"
         let link = dir.join("config.toml");
         std::os::unix::fs::symlink(real.join("config.toml"), &link).unwrap();
 
-        let changed = save_edits(&link, &[Edit::set("appearance", "padding", Setting::Int(9))]).unwrap();
+        let changed = save_edits(
+            &link,
+            &[Edit::set("appearance", "padding", Setting::Int(9))],
+        )
+        .unwrap();
         assert!(changed);
         // the symlink is still a symlink and the real file got the edit
         assert!(
@@ -285,13 +292,23 @@ edge = \"top\"
             std::fs::read_to_string(real.join("config.toml.bak")).unwrap(),
             SAMPLE
         );
-        save_edits(&link, &[Edit::set("appearance", "padding", Setting::Int(10))]).unwrap();
+        save_edits(
+            &link,
+            &[Edit::set("appearance", "padding", Setting::Int(10))],
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(real.join("config.toml.bak")).unwrap(),
             SAMPLE
         );
         // a no-op edit does not touch the file
-        assert!(!save_edits(&link, &[Edit::set("appearance", "padding", Setting::Int(10))]).unwrap());
+        assert!(
+            !save_edits(
+                &link,
+                &[Edit::set("appearance", "padding", Setting::Int(10))]
+            )
+            .unwrap()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -299,7 +316,11 @@ edge = \"top\"
     fn a_missing_file_starts_from_the_commented_reference() {
         let dir = std::env::temp_dir().join(format!("ht-settings-new-{}", std::process::id()));
         let path = dir.join("config.toml");
-        save_edits(&path, &[Edit::set("tabbar", "auto_hide", Setting::Bool(true))]).unwrap();
+        save_edits(
+            &path,
+            &[Edit::set("tabbar", "auto_hide", Setting::Bool(true))],
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("hashterm configuration"));
         assert!(toml::from_str::<Config>(&text).unwrap().tabbar.auto_hide);

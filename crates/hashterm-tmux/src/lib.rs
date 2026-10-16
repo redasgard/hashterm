@@ -4,6 +4,8 @@
 pub mod conf;
 pub mod controller;
 pub mod events;
+pub mod panes;
+pub mod search;
 
 pub use controller::{TmuxController, TmuxError, TmuxSessionId, unique_session_name};
 pub use events::TmuxEventBus;

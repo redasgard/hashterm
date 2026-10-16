@@ -268,6 +268,17 @@ impl GroupBar {
             let inner = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
             inner.append(&dot);
             inner.append(&label);
+            if let Some(badge) = g.attention {
+                let mark = gtk4::Label::new(Some("\u{25CF}"));
+                mark.add_css_class("group-attn");
+                mark.add_css_class(match badge {
+                    crate::tabbar::Badge::Bell => "attn-bell",
+                    crate::tabbar::Badge::Activity => "attn-activity",
+                    crate::tabbar::Badge::External => "attn-external",
+                });
+                inner.append(&mark);
+                button.set_tooltip_text(Some(&crate::attention::attention_tip(g.attention_count)));
+            }
             // Close-group button. It is an OVERLAY sibling of the row, not a
             // child of it: a button nested in a toggle button loses its clicks
             // to the row's drag/click gestures. Invisible (and untargetable, so

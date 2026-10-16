@@ -31,12 +31,17 @@ pub struct GroupInfo {
     pub name: String,
     pub color: Option<String>,
     pub count: usize,
+    /// Strongest badge among the group's tabs, and how many tabs have one.
+    pub attention: Option<Badge>,
+    pub attention_count: usize,
 }
 
 pub enum TabBarEvent {
     Select(String),
     Close(String),
     NewTab,
+    /// The "+ Group" chip (shown while the group bar is hidden).
+    NewGroup,
     /// Move tab `id` so it sits at `index` in the strip.
     Reorder(String, usize),
     /// Open the per-tab properties dialog (rename, accent color).
@@ -77,6 +82,11 @@ pub struct TabBar {
     cfg: RefCell<TabBarCfg>,
     /// The context menu is open: auto-hide must NOT conceal the bar.
     menu_open: Rc<std::cell::Cell<bool>>,
+    /// Human-readable shortcut labels for the "+" and close tooltips.
+    tips: RefCell<(String, String)>,
+    /// Show the "+ Group" chip after "+" (the group bar is hidden).
+    group_chip: std::cell::Cell<Option<bool>>,
+    group_chip_tip: RefCell<String>,
 }
 
 impl TabBar {
@@ -114,8 +124,7 @@ impl TabBar {
         // one step per ~1.0 of travel, like a notched wheel.
         // Filled with the bar itself once it exists (the controller is built
         // before the Rc).
-        let scroll_target: Rc<RefCell<Option<std::rc::Weak<TabBar>>>> =
-            Rc::new(RefCell::new(None));
+        let scroll_target: Rc<RefCell<Option<std::rc::Weak<TabBar>>>> = Rc::new(RefCell::new(None));
         {
             let slot = scroll_target.clone();
             handle.add_controller(wheel_steps(move |forward| {
@@ -214,6 +223,9 @@ impl TabBar {
             on_event: RefCell::new(None),
             cfg: RefCell::new(cfg.clone()),
             menu_open,
+            tips: RefCell::new((String::new(), String::new())),
+            group_chip: std::cell::Cell::new(None),
+            group_chip_tip: RefCell::new(String::new()),
         });
         *scroll_target.borrow_mut() = Some(Rc::downgrade(&this));
 
@@ -372,6 +384,24 @@ impl TabBar {
         self.tab_menu.popup();
     }
 
+    /// Show or hide the "+ Group" chip. `tip` is the new-group shortcut label.
+    pub fn set_group_chip(self: &Rc<Self>, show: bool, tip: &str) {
+        if self.group_chip.get() != Some(show) || *self.group_chip_tip.borrow() != tip {
+            self.group_chip.set(Some(show));
+            *self.group_chip_tip.borrow_mut() = tip.to_string();
+            self.rebuild();
+        }
+    }
+
+    /// Shortcut labels (e.g. "Ctrl+Shift+T") shown in the tooltips.
+    pub fn set_shortcut_tips(self: &Rc<Self>, new_tab: &str, close_tab: &str) {
+        let tips = (new_tab.to_string(), close_tab.to_string());
+        if *self.tips.borrow() != tips {
+            *self.tips.borrow_mut() = tips;
+            self.rebuild();
+        }
+    }
+
     pub fn apply_config(self: &Rc<Self>, cfg: &TabBarCfg) {
         self.container.set_orientation(orientation(cfg.edge));
         self.strip.set_orientation(orientation(cfg.edge));
@@ -413,8 +443,13 @@ impl TabBar {
                 .active(active.as_deref() == Some(tab.id.as_str()))
                 .build();
             button.add_css_class("tab");
+            button.set_tooltip_text(Some(&tab.title));
             if side {
                 button.set_width_request(180);
+            } else {
+                // Content-width tabs; the strip scrolls when they overflow.
+                button.set_hexpand(false);
+                button.set_halign(gtk4::Align::Start);
             }
             match tab.badge {
                 Some(Badge::Bell) => button.add_css_class("bell"),
@@ -459,7 +494,9 @@ impl TabBar {
             let label = gtk4::Label::builder()
                 .label(&tab.title)
                 .ellipsize(gtk4::pango::EllipsizeMode::End)
-                .hexpand(true)
+                .hexpand(side)
+                .max_width_chars(24)
+                .width_chars(6)
                 .xalign(0.0)
                 .build();
             let inner = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
@@ -470,6 +507,7 @@ impl TabBar {
                     .has_frame(false)
                     .build();
                 close.add_css_class("tab-close");
+                close.set_tooltip_text(Some(&tip_label("Close tab", &self.tips.borrow().1)));
                 let this = Rc::downgrade(self);
                 let id = tab.id.clone();
                 close.connect_clicked(move |_| {
@@ -569,6 +607,7 @@ impl TabBar {
             .has_frame(false)
             .build();
         plus.add_css_class("tab-new");
+        plus.set_tooltip_text(Some(&tip_label("New tab", &self.tips.borrow().0)));
         let this = Rc::downgrade(self);
         plus.connect_clicked(move |_| {
             if let Some(bar) = this.upgrade() {
@@ -576,6 +615,25 @@ impl TabBar {
             }
         });
         self.container.append(&plus);
+        if self.group_chip.get() == Some(true) && !side {
+            let chip = gtk4::Button::builder()
+                .label("+ Group")
+                .has_frame(false)
+                .build();
+            chip.add_css_class("tab-new");
+            chip.add_css_class("group-chip");
+            chip.set_tooltip_text(Some(&tip_label(
+                "New group: a separate row of tabs",
+                &self.group_chip_tip.borrow(),
+            )));
+            let this = Rc::downgrade(self);
+            chip.connect_clicked(move |_| {
+                if let Some(bar) = this.upgrade() {
+                    bar.emit(TabBarEvent::NewGroup);
+                }
+            });
+            self.container.append(&chip);
+        }
         self.reveal_active_tab();
     }
 
@@ -599,13 +657,12 @@ impl TabBar {
                     && t.is_active()
                     && let Some(b) = t.compute_bounds(&bar.container)
                 {
-                    let (adj, start, len) = if orientation(bar.cfg.borrow().edge)
-                        == gtk4::Orientation::Horizontal
-                    {
-                        (scroller.hadjustment(), b.x() as f64, b.width() as f64)
-                    } else {
-                        (scroller.vadjustment(), b.y() as f64, b.height() as f64)
-                    };
+                    let (adj, start, len) =
+                        if orientation(bar.cfg.borrow().edge) == gtk4::Orientation::Horizontal {
+                            (scroller.hadjustment(), b.x() as f64, b.width() as f64)
+                        } else {
+                            (scroller.vadjustment(), b.y() as f64, b.height() as f64)
+                        };
                     let (lo, page) = (adj.value(), adj.page_size());
                     if start < lo {
                         adj.set_value(start);
@@ -727,5 +784,13 @@ pub(crate) fn reveal_transition(edge: Edge) -> gtk4::RevealerTransitionType {
         Edge::Bottom => gtk4::RevealerTransitionType::SlideUp,
         Edge::Left => gtk4::RevealerTransitionType::SlideRight,
         Edge::Right => gtk4::RevealerTransitionType::SlideLeft,
+    }
+}
+
+fn tip_label(what: &str, shortcut: &str) -> String {
+    if shortcut.is_empty() {
+        what.to_string()
+    } else {
+        format!("{what} ({shortcut})")
     }
 }

@@ -1,0 +1,83 @@
+# Checks every push to main and every pull request: format, lint, tests.
+# Same container and toolchain bootstrap as slsa-release.yml; when issue #43
+# (pin rustup-init) is resolved, change both files together.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates pkg-config git tmux \
+            libgtk-4-dev libvte-2.91-gtk4-dev libgtk4-layer-shell-dev \
+            fakeroot dpkg-dev gzip
+
+      - name: Install Rust
+        # rust-toolchain.toml pins the exact channel and components.
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.sh https://sh.rustup.rs
+          sh rustup-init.sh -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain
+        run: |
+          tmux -V
+          cargo --version
+          cargo fmt --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        # tmux must be installed: the end-to-end test skips (and passes) without
+        # it. TMUX_TMPDIR must be short: unix socket paths cap at 108 bytes.
+        run: |
+          export TMUX_TMPDIR=$(mktemp -d /tmp/htci.XXXXXX)
+          unset DISPLAY WAYLAND_DISPLAY TMUX
+          cargo test --workspace --locked --no-fail-fast
+
+      - name: Debian version ordering
+        # A release candidate must sort BEFORE its final release.
+        run: |
+          dpkg --compare-versions 0.3.0~rc1-1 lt 0.3.0-1
+          dpkg --compare-versions 0.2.2-1 lt 0.3.0~rc1-1
+
+  deny:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates pkg-config git
+          curl --proto '=https' --tlsv1.2 -sSf -o rustup-init.sh https://sh.rustup.rs
+          sh rustup-init.sh -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Supply-chain audit
+        run: |
+          cargo install --locked cargo-deny
+          cargo deny check advisories bans sources licenses

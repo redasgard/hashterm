@@ -19,6 +19,9 @@ case $version in
         exit 1
         ;;
 esac
+# Semver pre-release "0.3.0-rc1" must become the Debian "0.3.0~rc1": with a
+# hyphen dpkg sorts the rc AFTER the final release, blocking the upgrade.
+version=$(printf '%s' "$version" | sed 's/-/~/')
 arch=$(dpkg --print-architecture)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
